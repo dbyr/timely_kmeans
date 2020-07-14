@@ -1,0 +1,10 @@
+[package]
+name = "timely_kmeans"
+version = "0.1.0"
+authors = ["dbyr <david.michael.byrne17@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+timely = "*"
+abomonation = "*"
+abomonation_derive = "*"
