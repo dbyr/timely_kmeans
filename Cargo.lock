@@ -113,6 +113,7 @@ name = "timely_kmeans"
 version = "0.1.0"
 dependencies = [
  "abomonation 0.7.3 (registry+https://github.com/rust-lang/crates.io-index)",
+ "abomonation_derive 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "timely 0.11.1 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
