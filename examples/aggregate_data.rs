@@ -1,6 +1,5 @@
-extern crate rust_classifiers;
-use rust_classifiers::example_datatypes::point::Point;
-use rust_classifiers::euclidean_distance::EuclideanDistance;
+extern crate timely_kmeans;
+
 
 use timely::dataflow::operators::{Inspect, Broadcast};
 use timely::dataflow::operators::map::Map;
