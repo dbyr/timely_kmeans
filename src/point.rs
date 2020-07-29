@@ -16,7 +16,7 @@ use std::fmt::{
 };
 
 // abomonation required to use datatype with timely
-#[derive(PartialEq, Default, Clone, Abomonation)]
+#[derive(PartialEq, Default, Copy, Clone, Abomonation)]
 pub struct Point {
     x: f64,
     y: f64
