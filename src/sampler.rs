@@ -16,7 +16,7 @@ impl<G: Scope> SampleData for Stream<G, Point> {
     fn sample_data(&self, rate: u8) -> Stream<G, Point> {
         let mut gen = thread_rng();
         self.filter(
-            move |x| gen.gen_range(0, 100) < rate
+            move |_| gen.gen_range(0, 100) < rate
         )
     }
 }

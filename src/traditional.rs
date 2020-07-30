@@ -1,18 +1,14 @@
 use crate::point::Point;
-use timely::dataflow::operators::{Operator, Broadcast, Capability, Capture, Branch, Partition, Map, Concat, Inspect, Probe};
+use timely::dataflow::operators::{Operator, Broadcast, Map, Concat};
 use timely::dataflow::*;
-use timely::dataflow::operators::{Input, Exchange};
-use rand::{thread_rng, Rng};
+use timely::dataflow::operators::Exchange;
+// use rand::{Rng, thread_rng};
 use std::f64;
-use timely::dataflow::channels::pact::{Pipeline, ParallelizationContract, Exchange as Exchanger};
-use timely::dataflow::operators::generic::{OperatorInfo, FrontieredInputHandle, OutputHandle};
-use timely::dataflow::channels::pushers::Tee;
+use timely::dataflow::channels::pact::Pipeline;
 use timely::Data;
-use timely::progress::Timestamp;
 use std::collections::HashMap;
 use std::borrow::ToOwned;
 use timely::dataflow::operators::generic::builder_rc::OperatorBuilder;
-use std::rc::Rc;
 
 trait ClosestNeighbour<G: Scope, D1: Data, D2: Data> {
     fn closest_neighbour(&self, sampled: &Stream<G, D1>) -> Stream<G, D2>;
@@ -50,7 +46,6 @@ trait SelectLocalRandom<G: Scope, D1: Data, D2: Data> {
 impl<G: Scope, D: Data> SelectLocalRandom<G, D, D> for Stream<G, D> {
     fn select_local_random(&self) -> (Stream<G, D>, Stream<G, D>) {
         // adapted from "partition" operator
-        let mut gen = thread_rng();
         let mut builder = OperatorBuilder::new("Selected local random".to_owned(), self.scope());
 
         let mut input = builder.new_input(self, Pipeline);
@@ -92,7 +87,7 @@ impl<G: Scope> SelectRandom<G, Point, Point> for Stream<G, Point> {
         let (local_selected, data) = self.select_local_random();
         let (global_selected, send_backs) = local_selected
             .map(move |d| (id, d))
-            .exchange(|d| 0u64)
+            .exchange(|_| 0u64)
             .select_local_random();
 
         let selected = global_selected

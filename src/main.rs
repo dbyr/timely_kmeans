@@ -10,18 +10,10 @@ mod sampler;
 
 use point::Point;
 use traditional::SelectRandom;
-use sampler::SampleData;
-use timely::dataflow::operators::{Operator, Broadcast, Capability, Capture, Branch, Partition, Map, Concat, Inspect, Probe};
-use timely::dataflow::*;
-use timely::dataflow::operators::{Input, Exchange};
-use rand::{thread_rng, Rng};
+// use sampler::SampleData;
+use timely::dataflow::operators::{Input, Inspect, Probe};
+use timely::dataflow::{InputHandle, ProbeHandle};
 use std::f64;
-use timely::dataflow::channels::pact::{Pipeline, ParallelizationContract, Exchange as Exchanger};
-use timely::dataflow::operators::generic::{OperatorInfo, FrontieredInputHandle, OutputHandle};
-use timely::dataflow::channels::pushers::Tee;
-use timely::Data;
-use timely::progress::Timestamp;
-use std::collections::HashMap;
 
 /*
 Potential solution:
