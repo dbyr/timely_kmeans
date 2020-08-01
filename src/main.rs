@@ -10,8 +10,9 @@ mod sampler;
 
 use point::Point;
 use traditional::SelectRandom;
+use traditional::SelectLocalRandom;
 // use sampler::SampleData;
-use timely::dataflow::operators::{Input, Inspect, Probe};
+use timely::dataflow::operators::{Input, Inspect, Probe, Concat};
 use timely::dataflow::{InputHandle, ProbeHandle};
 use std::f64;
 
@@ -29,23 +30,26 @@ fn main() {
         let mut input = InputHandle::new();
         let mut probe = ProbeHandle::new();
         let index = worker.index();
+        let printable1 = index;
+        let printable2 = index;
 
         // traditional
-        let _sampled = worker.dataflow(|scope| {
-            let (sampled, data) = scope.input_from(&mut input)
-                .select_random(index);
-            sampled.inspect(|x| println!("sampled: {:?}", x)).probe_with(&mut probe);
-            data.inspect(|x| println!("data: {:?}", x)).probe_with(&mut probe);
+        worker.dataflow(|scope| {
+            let (sampled, data) =
+                scope.input_from(&mut input).select_local_random();
+            sampled
+                .inspect_batch(move |t, x|
+                    x.iter().for_each(|v| println!("worker {} sampled: {:?} w/ t={:?}", printable1, v, t))
+                )
+                .probe_with(&mut probe);
+            data
+                .inspect_batch(move |t, x|
+                    x.iter().for_each(|v| println!("worker {} data: {:?} w/ t={:?}", printable2, v, t))
+                )
+                .probe_with(&mut probe);
         });
 
-        // let _sampled = worker.dataflow(|scope| {
-        //     let sampled = scope.input_from(&mut input)
-        //         .sample_data(50)
-        //         .inspect(|x| println!("sampled {:?}", x))
-        //         .probe_with(&mut probe);
-        // });
-
-        for i in 0..10 {
+        for i in 0..2 {
             println!("worker {} sending round {}", index, i);
             for j in 0..10 {
                 input.send(
