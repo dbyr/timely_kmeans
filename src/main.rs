@@ -36,7 +36,7 @@ fn main() {
         // traditional
         worker.dataflow(|scope| {
             let (sampled, data) =
-                scope.input_from(&mut input).select_local_random();
+                scope.input_from(&mut input).select_random(index.clone());
             sampled
                 .inspect_batch(move |t, x|
                     x.iter().for_each(|v| println!("worker {} sampled: {:?} w/ t={:?}", printable1, v, t))
@@ -49,7 +49,7 @@ fn main() {
                 .probe_with(&mut probe);
         });
 
-        for i in 0..2 {
+        for i in 0..3 {
             println!("worker {} sending round {}", index, i);
             for j in 0..10 {
                 input.send(

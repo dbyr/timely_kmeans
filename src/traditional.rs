@@ -5,10 +5,12 @@ use timely::dataflow::operators::Exchange;
 use rand::{Rng, thread_rng};
 use std::f64;
 use timely::dataflow::channels::pact::Pipeline;
-use timely::Data;
+use timely::{Data, PartialOrder};
 use std::collections::HashMap;
 use std::borrow::ToOwned;
 use timely::dataflow::operators::generic::builder_rc::OperatorBuilder;
+use timely::progress::frontier::{AntichainRef, MutableAntichain};
+use timely::progress::Timestamp;
 
 trait ClosestNeighbour<G: Scope, D1: Data, D2: Data> {
     fn closest_neighbour(&self, sampled: &Stream<G, D1>) -> Stream<G, D2>;
@@ -52,6 +54,26 @@ impl<G: Scope> ClosestNeighbour<G, Point, (f64, Point)> for Stream<G, (f64, Poin
     }
 }
 
+fn smallest_time<'r, 'a, T: 'a + Ord + PartialOrder + Clone>(
+    chain: &'r AntichainRef<'a, T>,
+    larger_than: &T
+) -> Option<&'r T> {
+    let mut smallest = None;
+    chain.iter().for_each(|v| {
+        if v.less_equal(larger_than) {
+            println!("Too small");
+        } // don't change anything
+        else if smallest.is_none() {
+            println!("Smallest is none");
+            smallest = Some(v);
+        } else if v.less_than(smallest.as_ref().unwrap()) {
+            println!("Smaller");
+            smallest = Some(v);
+        }
+    });
+    smallest
+}
+
 // currently this method is implemented in a trivial and not-actually-random
 // manner, I am still unsure how to implement true random selection
 // using tdf (it's easy with a normal stream, but with the way the capabilities
@@ -59,7 +81,7 @@ impl<G: Scope> ClosestNeighbour<G, Point, (f64, Point)> for Stream<G, (f64, Poin
 impl<G: Scope, D: Data> SelectLocalRandom<G, D, D> for Stream<G, D> {
     fn select_local_random(&self) -> (Stream<G, D>, Stream<G, D>) {
         let mut builder = OperatorBuilder::new("Selected local random".to_owned(), self.scope());
-        builder.set_notify(true);
+        // builder.set_notify(true);
         let mut gen = thread_rng();
 
         // set up the input and output points for this stream
@@ -69,17 +91,20 @@ impl<G: Scope, D: Data> SelectLocalRandom<G, D, D> for Stream<G, D> {
 
         // builds the operator
         builder.build(move |mut caps| {
+
             let mut vector = Vec::new();
             let mut firsts = HashMap::new();
-            let selected_cap = caps.pop().unwrap();
-            let data_cap = caps.pop().unwrap();
+            let mut selected_cap = caps.pop();
+            let mut data_cap = caps.pop();
 
             move |frontiers| {
+                if selected_cap.is_none() { // is this even possible?
+                    return;
+                }
                 let mut data_handle = data_output.activate();
                 let mut selected_handle = selected_output.activate();
-                let mut data_session = data_handle.session(&data_cap);
-                let mut selected_session = selected_handle.session(&selected_cap);
                 input.for_each(|time, data| {
+                    let mut data_session = data_handle.session(data_cap.as_ref().unwrap());
                     data.swap(&mut vector);
                     let mut first = firsts.entry(time.time().clone()).or_insert(
                         (1f64, None)
@@ -105,14 +130,45 @@ impl<G: Scope, D: Data> SelectLocalRandom<G, D, D> for Stream<G, D> {
                 });
 
                 // now send the randomly selected value
-                // let mut selected_handle = selected_output.activate();
-                let frontier = frontiers[0].frontier(); // should only be one to match the input
-                for (time, first) in firsts.iter_mut() {
-                    if !frontier.less_equal(time) {
-                        let mut to_send = None;
-                        std::mem::swap(&mut to_send, &mut first.1);
-                        if let Some(s) = to_send {
-                            selected_session.give(s);
+                let mut frontier = frontiers[0].frontier(); // should only be one to match the input
+                if !firsts.is_empty() {
+                    for (time, first) in firsts.iter_mut() {
+                        if !frontier.less_equal(time) {
+                            let mut to_send = None;
+                            std::mem::swap(&mut to_send, &mut first.1);
+                            if let Some(s) = to_send {
+                                let mut selected_session = selected_handle.session(selected_cap.as_ref().unwrap());
+                                selected_session.give(s);
+                            }
+
+                            // attempt to either downgrade or drop the capabilities of outputs
+                            let new_time = smallest_time(&frontier, time);
+                            match new_time {
+                                Some(t) => {
+                                    println!("Downgraded");
+                                    data_cap.as_mut().unwrap().downgrade(t);
+                                    selected_cap.as_mut().unwrap().downgrade(t);
+                                },
+                                None => {
+                                    println!("Dropped");
+                                    data_cap = None;
+                                    selected_cap = None;
+                                }
+                            }
+                        }
+                    }
+                } else {
+
+                    // if its empty and the timestamp has been surpassed, then
+                    // this must be the last of the data
+                    if let Some(t) = data_cap.as_ref() {
+                        if !frontier.less_equal(t.time()) {
+                            data_cap = None;
+                        }
+                    }
+                    if let Some(t) = selected_cap.as_ref() {
+                        if !frontier.less_equal(t.time()) {
+                            selected_cap = None;
                         }
                     }
                 }
@@ -127,6 +183,7 @@ impl<G: Scope, D: Data> SelectLocalRandom<G, D, D> for Stream<G, D> {
 impl<G: Scope> SelectRandom<G, Point, Point> for Stream<G, Point> {
     fn select_random(&self, id: usize) -> (Stream<G, Point>, Stream<G, Point>) {
         // selects a random value locally & independently, then globally
+        let
         let (local_selected, data) = self.select_local_random();
         let (global_selected, send_backs) = local_selected
             .map(move |d| (id, d))
