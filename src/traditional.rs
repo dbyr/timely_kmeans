@@ -183,7 +183,6 @@ impl<G: Scope, D: Data> SelectLocalRandom<G, D, D> for Stream<G, D> {
 impl<G: Scope> SelectRandom<G, Point, Point> for Stream<G, Point> {
     fn select_random(&self, id: usize) -> (Stream<G, Point>, Stream<G, Point>) {
         // selects a random value locally & independently, then globally
-        let
         let (local_selected, data) = self.select_local_random();
         let (global_selected, send_backs) = local_selected
             .map(move |d| (id, d))
