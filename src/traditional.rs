@@ -1,5 +1,5 @@
 use crate::point::Point;
-use timely::dataflow::operators::{Operator, Broadcast, Map, Concat, Capability, FrontierNotificator};
+use timely::dataflow::operators::{Operator, Broadcast, Map, Concat};
 use timely::dataflow::*;
 use timely::dataflow::operators::Exchange;
 use rand::{Rng, thread_rng};
@@ -9,8 +9,7 @@ use timely::{Data, PartialOrder};
 use std::collections::HashMap;
 use std::borrow::ToOwned;
 use timely::dataflow::operators::generic::builder_rc::OperatorBuilder;
-use timely::progress::frontier::{AntichainRef, MutableAntichain};
-use timely::progress::Timestamp;
+use timely::progress::frontier::AntichainRef;
 
 trait ClosestNeighbour<G: Scope, D1: Data, D2: Data> {
     fn closest_neighbour(&self, sampled: &Stream<G, D1>) -> Stream<G, D2>;
@@ -23,7 +22,7 @@ trait SelectSamples<G: Scope, D1: Data, D2: Data> {
 pub trait SelectRandom<G: Scope, D1: Data, D2: Data> {
     fn select_random(&self, id: usize) -> (Stream<G, D1>, Stream<G, D2>);
 }
-pub trait SelectLocalRandom<G: Scope, D1: Data, D2: Data> {
+trait SelectLocalRandom<G: Scope, D1: Data, D2: Data> {
     fn select_local_random(&self) -> (Stream<G, D1>, Stream<G, D2>);
 }
 
@@ -130,7 +129,7 @@ impl<G: Scope, D: Data> SelectLocalRandom<G, D, D> for Stream<G, D> {
                 });
 
                 // now send the randomly selected value
-                let mut frontier = frontiers[0].frontier(); // should only be one to match the input
+                let frontier = frontiers[0].frontier(); // should only be one to match the input
                 if !firsts.is_empty() {
                     for (time, first) in firsts.iter_mut() {
                         if !frontier.less_equal(time) {
@@ -172,7 +171,7 @@ impl<G: Scope, D: Data> SelectLocalRandom<G, D, D> for Stream<G, D> {
                         }
                     }
                 }
-                firsts.retain(|t, first| first.1.is_some());
+                firsts.retain(|_, first| first.1.is_some());
             }
         });
         (selected_stream, data_stream)

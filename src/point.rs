@@ -22,6 +22,7 @@ pub struct Point {
     y: f64
 }
 
+#[allow(dead_code)]
 impl Point{
     pub fn new(x: f64, y: f64) -> Point {
         Point{x: x, y: y}

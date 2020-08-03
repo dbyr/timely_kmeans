@@ -4,15 +4,15 @@ extern crate abomonation_derive;
 mod point;
 mod random;
 mod euclidean_distance;
+#[allow(dead_code)]
 mod common;
 mod traditional;
 mod sampler;
 
 use point::Point;
 use traditional::SelectRandom;
-use traditional::SelectLocalRandom;
 // use sampler::SampleData;
-use timely::dataflow::operators::{Input, Inspect, Probe, Concat};
+use timely::dataflow::operators::{Input, Inspect, Probe};
 use timely::dataflow::{InputHandle, ProbeHandle};
 use std::f64;
 
