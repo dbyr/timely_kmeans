@@ -10,9 +10,9 @@ mod traditional;
 mod sampler;
 
 use point::Point;
-use traditional::SelectRandom;
+use traditional::{SelectRandom, ClosestNeighbour};
 // use sampler::SampleData;
-use timely::dataflow::operators::{Input, Inspect, Probe};
+use timely::dataflow::operators::{Input, Inspect, Probe, Map};
 use timely::dataflow::{InputHandle, ProbeHandle};
 use std::f64;
 
@@ -30,37 +30,51 @@ fn main() {
         let mut input = InputHandle::new();
         let mut probe = ProbeHandle::new();
         let index = worker.index();
-        let printable1 = index;
-        let printable2 = index;
 
-        // traditional
+        // select the initial random point
         worker.dataflow(|scope| {
             let (sampled, data) =
                 scope.input_from(&mut input).select_random(index.clone());
             sampled
                 .inspect_batch(move |t, x|
-                    x.iter().for_each(|v| println!("worker {} sampled: {:?} w/ t={:?}", printable1, v, t))
+                    x.iter().for_each(move |v| println!("worker {} sampled: {:?} w/ t={:?}", index.clone(), v, t))
                 )
                 .probe_with(&mut probe);
             data
                 .inspect_batch(move |t, x|
-                    x.iter().for_each(|v| println!("worker {} data: {:?} w/ t={:?}", printable2, v, t))
+                    x.iter().for_each(move |v| println!("worker {} data: {:?} w/ t={:?}", index.clone(), v, t))
+                )
+                .probe_with(&mut probe);
+
+            // calculate the distance for the randomly selected point
+            let _initial_distanced = data
+                .map(|p| (f64::MAX, p))
+                .closest_neighbour(&sampled)
+                .inspect_batch(move |t, v|
+                    v.iter().for_each(|x|println!("{:?} is {} away at time {:?}", x.1, x.0, t))
                 )
                 .probe_with(&mut probe);
         });
 
-        for i in 0..3 {
-            println!("worker {} sending round {}", index, i);
-            for j in 0..10 {
-                input.send(
-                    Point::new((i + j) as f64+5.0, index as f64)
-                );
-            }
-            input.advance_to(input.epoch() + 1);
-            while probe.less_than(input.time()) {
-                worker.step();
-            }
+        // TODO: two ways to proceed:
+        // 1. do all the summing and such for the centroids as a stream and return
+        // a single value
+        // 2. only do the summing as a stream and collect the result below
+
+        // for i in 0..3 {
+        let i = 0;
+        println!("worker {} sending round {}", index, i);
+        for j in 0..10 {
+            input.send(
+                Point::new((i + j) as f64+5.0, index as f64)
+            );
         }
+        input.advance_to(input.epoch() + 1);
+            // while probe.less_than(input.time()) {
+            //     std::thread::sleep(std::time::Duration::from_millis(500));
+            //     worker.step();
+            // }
+        // }
     }).unwrap();
 }
 

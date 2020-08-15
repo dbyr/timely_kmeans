@@ -1,7 +1,6 @@
 use crate::point::Point;
-use timely::dataflow::operators::{Operator, Broadcast, Map, Concat};
+use timely::dataflow::operators::{Operator, Exchange, Broadcast, Map, Concat};
 use timely::dataflow::*;
-use timely::dataflow::operators::Exchange;
 use rand::{Rng, thread_rng};
 use std::f64;
 use timely::dataflow::channels::pact::Pipeline;
@@ -11,7 +10,9 @@ use std::borrow::ToOwned;
 use timely::dataflow::operators::generic::builder_rc::OperatorBuilder;
 use timely::progress::frontier::AntichainRef;
 
-trait ClosestNeighbour<G: Scope, D1: Data, D2: Data> {
+use crate::euclidean_distance::EuclideanDistance;
+
+pub trait ClosestNeighbour<G: Scope, D1: Data, D2: Data> {
     fn closest_neighbour(&self, sampled: &Stream<G, D1>) -> Stream<G, D2>;
 }
 
@@ -26,33 +27,64 @@ trait SelectLocalRandom<G: Scope, D1: Data, D2: Data> {
     fn select_local_random(&self) -> (Stream<G, D1>, Stream<G, D2>);
 }
 
+// TODO: this operator will need to have data flow control when using lots of data
+// https://timelydataflow.github.io/timely-dataflow/chapter_4/chapter_4_3.html#flow-control
 impl<G: Scope> ClosestNeighbour<G, Point, (f64, Point)> for Stream<G, (f64, Point)> {
     fn closest_neighbour(&self, sampled: &Stream<G, Point>)
                          -> Stream<G, (f64, Point)> {
-        self.binary(
+        self.binary_frontier(
             sampled,
             Pipeline,
             Pipeline,
             "Find closest neighbours",
-            |_, _| {
-                // let mut stash = HashMap::new();
+            move |_, _| {
+                let mut sample_stash = HashMap::new();
+                let mut data_stash = HashMap::new();
                 move |data, samples,  output| {
                     // insert the sampled data for this iteration
-                    // while let Some((time, data)) = samples.next() {
-                    //     let sampled = stash.entry(time.time().clone()).or_insert(Vec::new());
-                    //     for datum in data.into_iter() {
-                    //         sampled.push(datum);
-                    //     }
-                    // }
+                    while let Some((time, data)) = samples.next() {
+                        let (sampled, _) = sample_stash.entry(time.time().clone()).or_insert((Vec::new(), time.retain()));
+                        for datum in data.iter() {
+                            sampled.push(*datum);
+                        }
+                    }
 
                     // compare all the other data with the sampled to re-calcaulte their nearest neighbour
+                    while let Some((time, data)) = data.next() {
+                        let points = data_stash.entry(time.time().clone()).or_insert(Vec::new());
+                        for datum in data.iter() {
+                            points.push(*datum);
+                        }
+                    }
+                    for (time, (stashed, cap)) in sample_stash.iter_mut() {
 
+                        // ensure we have all samples before proceeding
+                        if !samples.frontier().less_equal(&time) && !data.frontier().less_equal(&time) {
+                            let mut session = output.session(cap);
+                            let mut sampled = Vec::new();
+                            let to_update = data_stash.remove(time).unwrap_or_else(|| Vec::new());
+                            std::mem::swap(&mut sampled, stashed);
+                            for (old_dist, point) in to_update {
+                                for sampled in sampled.iter() {
+                                    let new_dist = point.distance(sampled);
+                                    if new_dist < old_dist {
+                                        session.give((new_dist, point));
+                                    } else {
+                                        session.give((old_dist, point));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    sample_stash.retain(|_, (x, _)| !x.is_empty());
+                    data_stash.retain(|_, x| !x.is_empty());
                 }
             }
         )
     }
 }
 
+// selects the smallest time from chain larger than larger_than
 fn smallest_time<'r, 'a, T: 'a + Ord + PartialOrder + Clone>(
     chain: &'r AntichainRef<'a, T>,
     larger_than: &T
@@ -60,23 +92,17 @@ fn smallest_time<'r, 'a, T: 'a + Ord + PartialOrder + Clone>(
     let mut smallest = None;
     chain.iter().for_each(|v| {
         if v.less_equal(larger_than) {
-            println!("Too small");
         } // don't change anything
         else if smallest.is_none() {
-            println!("Smallest is none");
             smallest = Some(v);
         } else if v.less_than(smallest.as_ref().unwrap()) {
-            println!("Smaller");
             smallest = Some(v);
         }
     });
     smallest
 }
 
-// currently this method is implemented in a trivial and not-actually-random
-// manner, I am still unsure how to implement true random selection
-// using tdf (it's easy with a normal stream, but with the way the capabilities
-// work in tdf it doesn't appear to be possible to do it that way)
+// selects a single value from the stream randomly and evenly among all values
 impl<G: Scope, D: Data> SelectLocalRandom<G, D, D> for Stream<G, D> {
     fn select_local_random(&self) -> (Stream<G, D>, Stream<G, D>) {
         let mut builder = OperatorBuilder::new("Selected local random".to_owned(), self.scope());
@@ -144,12 +170,10 @@ impl<G: Scope, D: Data> SelectLocalRandom<G, D, D> for Stream<G, D> {
                             let new_time = smallest_time(&frontier, time);
                             match new_time {
                                 Some(t) => {
-                                    println!("Downgraded");
                                     data_cap.as_mut().unwrap().downgrade(t);
                                     selected_cap.as_mut().unwrap().downgrade(t);
                                 },
                                 None => {
-                                    println!("Dropped");
                                     data_cap = None;
                                     selected_cap = None;
                                 }
@@ -178,9 +202,10 @@ impl<G: Scope, D: Data> SelectLocalRandom<G, D, D> for Stream<G, D> {
     }
 }
 
-
+// selects a single random value evenly from among all workers
 impl<G: Scope> SelectRandom<G, Point, Point> for Stream<G, Point> {
     fn select_random(&self, id: usize) -> (Stream<G, Point>, Stream<G, Point>) {
+
         // selects a random value locally & independently, then globally
         let (local_selected, data) = self.select_local_random();
         let (global_selected, send_backs) = local_selected
@@ -200,7 +225,6 @@ impl<G: Scope> SelectRandom<G, Point, Point> for Stream<G, Point> {
                     .exchange(|d| d.0 as u64)
                     .map(|d| d.1)
             );
-
         (selected, remaining)
     }
 }
