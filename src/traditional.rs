@@ -1,7 +1,4 @@
 use crate::point::Point;
-use timely::dataflow::operators::{Operator, Exchange, Broadcast, Map, Concat};
-use timely::dataflow::*;
-use rand::{Rng, thread_rng};
 use std::f64;
 use timely::dataflow::channels::pact::Pipeline;
 use timely::{Data, PartialOrder};
@@ -9,8 +6,22 @@ use std::collections::HashMap;
 use std::borrow::ToOwned;
 use timely::dataflow::operators::generic::builder_rc::OperatorBuilder;
 use timely::progress::frontier::AntichainRef;
+use rand::{Rng, thread_rng};
+use timely::dataflow::operators::{Operator, Exchange, Broadcast, Map, Concat};
+use timely::dataflow::{
+    Stream,
+    Scope
+};
 
 use crate::euclidean_distance::EuclideanDistance;
+
+pub trait SumDistances<G: Scope, D1: Data, D2: Data> {
+    fn sum_distances(&self) -> (Stream<G, D2>, Stream<G, D1>);
+}
+
+trait SumLocalDistances<G: Scope, D1: Data, D2: Data> {
+    fn sum_local_distances(&self) -> (Stream<G, D2>, Stream<G, D1>);
+}
 
 pub trait ClosestNeighbour<G: Scope, D1: Data, D2: Data> {
     fn closest_neighbour(&self, sampled: &Stream<G, D1>) -> Stream<G, D2>;
@@ -25,6 +36,91 @@ pub trait SelectRandom<G: Scope, D1: Data, D2: Data> {
 }
 trait SelectLocalRandom<G: Scope, D1: Data, D2: Data> {
     fn select_local_random(&self) -> (Stream<G, D1>, Stream<G, D2>);
+}
+
+impl<G: Scope> SumDistances<G, (f64, Point), f64> for Stream<G, (f64, Point)> {
+    fn sum_distances(&self) -> (Stream<G, f64>, Stream<G, (f64, Point)>) {
+        self.sum_local_distances()
+        // let (sum, pipe) = self.sum_local_distances();
+
+    }
+}
+
+impl<G: Scope> SumLocalDistances<G, (f64, Point), f64> for Stream<G, (f64, Point)> {
+    fn sum_local_distances(&self) -> (Stream<G, f64>, Stream<G, (f64, Point)>) {
+        let mut builder = OperatorBuilder::new("Selected local random".to_owned(), self.scope());
+
+        // set up the input and output points for this stream
+        let mut input = builder.new_input(self, Pipeline);
+        let (mut sum_output, sum_stream) = builder.new_output();
+        let (mut pipe_output, pipe_stream) = builder.new_output();
+
+        // builds the operator
+        builder.build(move |mut caps| {
+            let mut sums = HashMap::new();
+            let mut pipe_cap = caps.pop();
+            let mut sum_cap = caps.pop();
+
+            move |frontiers| {
+                if sum_cap.is_none() {
+                    return;
+                }
+                while let Some((cap, data)) = input.next() {
+                    let sum = sums.entry(cap.time().clone()).or_insert(
+                        0f64
+                    );
+                    println!("About to open pipe session");
+                    let mut pipe_handle = pipe_output.activate();
+                    let mut pipe_sesh = pipe_handle.session(pipe_cap.as_ref().unwrap());
+                    println!("Opened pipe session");
+                    for val in data.iter() {
+                        *sum += val.0;
+                        pipe_sesh.give(*val);
+                    }
+                }
+                let frontier = &frontiers[0].frontier();
+                if !sums.is_empty() {
+                    for (time, sum) in sums.iter_mut() {
+                        if !frontier.less_equal(time) {
+
+                            // send the sum along its way
+                            let mut sum_handle = sum_output.activate();
+                            let mut sum_sesh = sum_handle.session(sum_cap.as_ref().unwrap());
+                            println!("Opened sum session");
+                            sum_sesh.give(*sum);
+                            *sum = -1f64;
+
+                            // downgrade the capabilities
+                            let new_time = smallest_time(&frontier, time);
+                            match new_time {
+                                Some(t) => {
+                                    sum_cap.as_mut().unwrap().downgrade(t);
+                                    pipe_cap.as_mut().unwrap().downgrade(t);
+                                }
+                                None => {
+                                    sum_cap = None;
+                                    pipe_cap = None;
+                                }
+                            }
+                        }
+                    }
+                    sums.retain(|_, sum| *sum >= 0.0);
+                } else {
+                    if let Some(t) = pipe_cap.as_ref() {
+                        if !frontier.less_equal(t) {
+                            pipe_cap = None;
+                        }
+                    }
+                    if let Some(t) = sum_cap.as_ref() {
+                        if !frontier.less_equal(t) {
+                            sum_cap = None;
+                        }
+                    }
+                }
+            }
+        });
+        (sum_stream, pipe_stream)
+    }
 }
 
 // TODO: this operator will need to have data flow control when using lots of data
