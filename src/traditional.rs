@@ -23,6 +23,10 @@ trait SumLocalDistances<G: Scope, D1: Data, D2: Data> {
     fn sum_local_distances(&self) -> (Stream<G, D2>, Stream<G, D1>);
 }
 
+trait SumStream<G: Scope, D1: Data> {
+    fn sum(&self) -> Stream<G, D1>;
+}
+
 pub trait ClosestNeighbour<G: Scope, D1: Data, D2: Data> {
     fn closest_neighbour(&self, sampled: &Stream<G, D1>) -> Stream<G, D2>;
 }
@@ -38,11 +42,41 @@ trait SelectLocalRandom<G: Scope, D1: Data, D2: Data> {
     fn select_local_random(&self) -> (Stream<G, D1>, Stream<G, D2>);
 }
 
+impl<G: Scope> SumStream<G, f64> for Stream<G, f64> {
+    fn sum(&self) -> Stream<G, f64> {
+        self.unary_frontier(
+            Pipeline,
+            "Sum values",
+            |_, _| {
+                let mut sums = HashMap::new();
+                move |input, output| {
+                    while let Some((cap, data)) = input.next() {
+                        let sum = sums.entry(cap.retain()).or_insert(Some(0f64))
+                            .as_mut().unwrap();
+                        for datum in data.iter() {
+                            *sum += *datum;
+                        }
+                    }
+                    for (time, sum_opt) in sums.iter_mut() {
+                        if !input.frontier().less_equal(time.time()) {
+                            let mut session = output.session(time);
+                            let sum = sum_opt.unwrap();
+                            session.give(sum);
+                            *sum_opt = None;
+                        }
+                    }
+                    sums.retain(|_, v| v.is_some());
+                }
+            }
+        )
+    }
+}
+
 impl<G: Scope> SumDistances<G, (f64, Point), f64> for Stream<G, (f64, Point)> {
     fn sum_distances(&self) -> (Stream<G, f64>, Stream<G, (f64, Point)>) {
-        self.sum_local_distances()
-        // let (sum, pipe) = self.sum_local_distances();
-
+        let (sum, piped) = self.sum_local_distances();
+        let glob_sum = sum.exchange(|_| 0).sum().broadcast();
+        (glob_sum, piped)
     }
 }
 
