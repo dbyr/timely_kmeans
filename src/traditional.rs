@@ -16,7 +16,7 @@ use timely::dataflow::{
 use crate::euclidean_distance::EuclideanDistance;
 
 pub trait SumDistances<G: Scope, D1: Data, D2: Data> {
-    fn sum_distances(&self) -> (Stream<G, D2>, Stream<G, D1>);
+    fn sum_square_distances(&self) -> (Stream<G, D2>, Stream<G, D1>);
 }
 
 trait SumLocalDistances<G: Scope, D1: Data, D2: Data> {
@@ -25,14 +25,16 @@ trait SumLocalDistances<G: Scope, D1: Data, D2: Data> {
 
 trait SumStream<G: Scope, D1: Data> {
     fn sum(&self) -> Stream<G, D1>;
+
+    fn sum_of_squares(&self) -> Stream<G, D1>;
 }
 
 pub trait ClosestNeighbour<G: Scope, D1: Data, D2: Data> {
     fn closest_neighbour(&self, sampled: &Stream<G, D1>) -> Stream<G, D2>;
 }
 
-trait SelectSamples<G: Scope, D1: Data, D2: Data> {
-    fn sampled_data(&self, total_weight: f64) -> (Stream<G, D1>, Stream<G, D2>);
+pub trait SelectSamples<G: Scope, D1: Data, D2: Data> {
+    fn sample_data(&self, selection_ratios: &Stream<G, D2>) -> (Stream<G, D1>, Stream<G, D1>);
 }
 
 pub trait SelectRandom<G: Scope, D1: Data, D2: Data> {
@@ -40,6 +42,106 @@ pub trait SelectRandom<G: Scope, D1: Data, D2: Data> {
 }
 trait SelectLocalRandom<G: Scope, D1: Data, D2: Data> {
     fn select_local_random(&self) -> (Stream<G, D1>, Stream<G, D2>);
+}
+
+// TODO: this operator will need to have data flow control when using lots of data
+// ratios are (sum_of_distances_squared, number_of_categories)
+impl<G: Scope> SelectSamples<G, (f64, Point), (f64, usize)> for Stream<G, (f64, Point)> {
+    fn sample_data(&self, selection_ratios: &Stream<G, (f64, usize)>)
+        -> (Stream<G, (f64, Point)>, Stream<G, (f64, Point)>)
+    {
+        let mut builder = OperatorBuilder::new("Select samples".to_owned(), self.scope());
+
+        // set up the input and output points for this stream
+        let mut data_input = builder.new_input(self, Pipeline);
+        let mut ratio_input = builder.new_input(selection_ratios, Pipeline);
+        let (mut sampled_output, sampled_stream) = builder.new_output();
+        let (mut data_output, data_stream) = builder.new_output();
+        let mut generator = rand::thread_rng();
+
+        // builds the operator
+        builder.build(move |mut caps| {
+            let mut rates = HashMap::new();
+            let mut to_sample = HashMap::new();
+            let mut data_cap = caps.pop();
+            let mut sampled_cap = caps.pop();
+
+            move |frontiers| {
+                if sum_cap.is_none() {
+                    return;
+                }
+                while let Some((cap, weight)) = ratio_input.next() {
+                    let rate = rates.entry(cap.retain()).or_insert((0f64, 0));
+                    *rate = weight[0];
+                }
+                while let Some((cap, data)) = data_input.next() {
+                    let incoming_data = to_sample
+                        .entry(cap.time().clone())
+                        .or_insert_with(Vec::new);
+                    for datum in data {
+                        incoming_data.push(datum);
+                    }
+                }
+                let rates_frontier = &frontiers[0].frontier();
+                let sample_frontier = &frontiers[1].frontier();
+                if !rates.is_empty() {
+                    for (time, weight) in rates.iter() {
+                        if !rates_frontier.less_equal(time.time()) {
+
+                            let mut sample_handle = sampled_output.activate();
+                            let mut sample_sesh = sample_handle.session(sample_cap.as_ref().unwrap());
+                            let mut data_handle = data_output.activate();
+                            let mut data_sesh = data_handle.session(data_cap.as_ref().unwrap());
+                            if let Some(data) = to_sample.get_mut(time.time()) {
+                                while let Some(datum) = data.pop() {
+                                    let prob = generator.gen_range(0.0, 1.0);
+                                    let select = (datum.0.powi(2) * weight.1 as f64) / weight.0;
+                                    if prob < select {
+                                        sample_sesh.give(datum);
+                                    } else {
+                                        data_sesh.give(datum);
+                                    }
+                                }
+                            }
+
+                            // downgrade the capabilities
+                            let new_time = smallest_time(&rates_frontier, time.time());
+                            match new_time {
+                                Some(t) => {
+                                    sampled_cap.as_mut().unwrap().downgrade(t);
+                                }
+                                None => {
+                                    samppled_cap = None;
+                                }
+                            }
+                            let new_time = smallest_time(&data_frontier, time.time());
+                            match new_time {
+                                Some(t) => {
+                                    data_cap.as_mut().unwrap().downgrade(t);
+                                }
+                                None => {
+                                    data_cap = None;
+                                }
+                            }
+                        }
+                    }
+                    sums.retain(|_, sum| *sum >= 0.0);
+                } else {
+                    if let Some(t) = sampled_cap.as_ref() {
+                        if !frontier.less_equal(t) {
+                            sampled_cap = None;
+                        }
+                    }
+                    if let Some(t) = data_cap.as_ref() {
+                        if !frontier.less_equal(t) {
+                            data_cap = None;
+                        }
+                    }
+                }
+            }
+        });
+        (sampled_stream, data_stream)
+    }
 }
 
 impl<G: Scope> SumStream<G, f64> for Stream<G, f64> {
@@ -70,19 +172,23 @@ impl<G: Scope> SumStream<G, f64> for Stream<G, f64> {
             }
         )
     }
+
+    fn sum_of_squares(&self) -> Stream<G, f64> {
+        self.map(|x| x * x).sum()
+    }
 }
 
 impl<G: Scope> SumDistances<G, (f64, Point), f64> for Stream<G, (f64, Point)> {
-    fn sum_distances(&self) -> (Stream<G, f64>, Stream<G, (f64, Point)>) {
+    fn sum_square_distances(&self) -> (Stream<G, f64>, Stream<G, (f64, Point)>) {
         let (sum, piped) = self.sum_local_distances();
-        let glob_sum = sum.exchange(|_| 0).sum().broadcast();
+        let glob_sum = sum.exchange(|_| 0).sum_of_squares().broadcast();
         (glob_sum, piped)
     }
 }
 
 impl<G: Scope> SumLocalDistances<G, (f64, Point), f64> for Stream<G, (f64, Point)> {
     fn sum_local_distances(&self) -> (Stream<G, f64>, Stream<G, (f64, Point)>) {
-        let mut builder = OperatorBuilder::new("Selected local random".to_owned(), self.scope());
+        let mut builder = OperatorBuilder::new("Select local random".to_owned(), self.scope());
 
         // set up the input and output points for this stream
         let mut input = builder.new_input(self, Pipeline);
@@ -103,10 +209,8 @@ impl<G: Scope> SumLocalDistances<G, (f64, Point), f64> for Stream<G, (f64, Point
                     let sum = sums.entry(cap.time().clone()).or_insert(
                         0f64
                     );
-                    println!("About to open pipe session");
                     let mut pipe_handle = pipe_output.activate();
                     let mut pipe_sesh = pipe_handle.session(pipe_cap.as_ref().unwrap());
-                    println!("Opened pipe session");
                     for val in data.iter() {
                         *sum += val.0;
                         pipe_sesh.give(*val);
@@ -120,7 +224,6 @@ impl<G: Scope> SumLocalDistances<G, (f64, Point), f64> for Stream<G, (f64, Point
                             // send the sum along its way
                             let mut sum_handle = sum_output.activate();
                             let mut sum_sesh = sum_handle.session(sum_cap.as_ref().unwrap());
-                            println!("Opened sum session");
                             sum_sesh.give(*sum);
                             *sum = -1f64;
 
@@ -221,9 +324,7 @@ fn smallest_time<'r, 'a, T: 'a + Ord + PartialOrder + Clone>(
 ) -> Option<&'r T> {
     let mut smallest = None;
     chain.iter().for_each(|v| {
-        if v.less_equal(larger_than) {
-        } // don't change anything
-        else if smallest.is_none() {
+        if !v.less_equal(larger_than) && smallest.is_none() {
             smallest = Some(v);
         } else if v.less_than(smallest.as_ref().unwrap()) {
             smallest = Some(v);
@@ -312,7 +413,7 @@ impl<G: Scope, D: Data> SelectLocalRandom<G, D, D> for Stream<G, D> {
                     }
                 } else {
 
-                    // if its empty and the timestamp has been surpassed, then
+                    // if firsts is empty and the timestamp has been surpassed, then
                     // this must be the last of the data
                     if let Some(t) = data_cap.as_ref() {
                         if !frontier.less_equal(t.time()) {

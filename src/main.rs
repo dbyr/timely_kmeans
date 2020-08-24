@@ -28,7 +28,6 @@ a single global one and broadcasts)
 fn main() {
     timely::execute_from_args(std::env::args(), |worker| {
         let mut input = InputHandle::new();
-        // TODO: Use multiple probes to improve speed/efficiency
         // let mut initial_probe = ProbeHandle::new();
         // let mut distance_probe = ProbeHandle::new();
         let mut sum_probe = ProbeHandle::new();
@@ -43,10 +42,10 @@ fn main() {
                     x.iter().for_each(move |v| println!("worker {} sampled: {:?} w/ t={:?}", index.clone(), v, t))
                 );
                 // .probe_with(&mut initial_probe);
-            data
-                .inspect_batch(move |t, x|
-                    x.iter().for_each(move |v| println!("worker {} data: {:?} w/ t={:?}", index.clone(), v, t))
-                );
+            // data
+            //     .inspect_batch(move |t, x|
+            //         x.iter().for_each(move |v| println!("worker {} data: {:?} w/ t={:?}", index.clone(), v, t))
+            //     );
 
             // calculate the distance for the randomly selected point
             let initial_distanced = data
@@ -57,7 +56,7 @@ fn main() {
                 );
                 // .probe_with(&mut distance_probe);
 
-            let (summed, _piped) = initial_distanced.sum_distances();
+            let (summed, _piped) = initial_distanced.sum_square_distances();
             summed
                 .inspect_batch(move |t, v|
                     v.iter().for_each(|x| println!("sum to {} at {:?}", x, t))
