@@ -35,11 +35,108 @@ pub trait SelectSamples<G: Scope, D1: Data, D2: Data> {
     fn sample_data(&self, selection_ratios: &Stream<G, D2>) -> (Stream<G, D1>, Stream<G, D1>);
 }
 
+pub trait SelectWeightedInitial<G: Scope, D1: Data, D2: Data> {
+    fn select_weighted_initial(&self, sums: &Stream<G, D2>) -> (Stream<G, D1>, Stream<G, D1>);
+}
+
 pub trait SelectRandom<G: Scope, D1: Data, D2: Data> {
     fn select_random(&self, id: usize) -> (Stream<G, D1>, Stream<G, D2>);
 }
 trait SelectLocalRandom<G: Scope, D1: Data, D2: Data> {
     fn select_local_random(&self) -> (Stream<G, D1>, Stream<G, D2>);
+}
+
+// TODO: this operator will need to have data flow control when using lots of data
+impl<G: Scope> SelectWeightedInitial<G, (f64, Point), f64> for Stream<G, (f64, Point)> {
+    fn select_weighted_initial(&self, sums: &Stream<G, f64>)
+        -> (Stream<G, (f64, Point)>, Stream<G, (f64, Point)>)
+    {
+        let mut builder = OperatorBuilder::new("Select samples".to_owned(), self.scope());
+
+        // set up the input and output points for this stream
+        let mut data_input = builder.new_input(self, Pipeline);
+        let mut ratio_input = builder.new_input(selection_ratios, Pipeline);
+        let (mut sampled_output, sampled_stream) = builder.new_output();
+        let (mut data_output, data_stream) = builder.new_output();
+        let mut generator = rand::thread_rng();
+
+        // builds the operator
+        builder.build(move |mut caps| {
+            let mut probs = HashMap::new();
+            let mut to_sample = HashMap::new();
+            let mut data_cap = caps.pop();
+            let mut sampled_cap = caps.pop();
+
+            move |frontiers| {
+                if data_cap.is_none() {
+                    return;
+                }
+                while let Some((cap, weight)) = ratio_input.next() {
+                    let rate = probs.entry(cap.retain()).or_insert(0f64);
+                    *rate = generator.gen_range(0.0, weight[0]);
+                }
+                while let Some((cap, data)) = data_input.next() {
+                    let incoming_data = to_sample
+                        .entry(cap.time().clone())
+                        .or_insert_with(Vec::new);
+                    incoming_data.append(&mut data.replace(Vec::new()));
+                }
+                let rates_frontier = &frontiers[0].frontier();
+                let sample_frontier = &frontiers[1].frontier();
+                if !probs.is_empty() {
+                    for (time, prob) in probs.iter_mut() {
+                        if !rates_frontier.less_equal(time.time()) {
+
+                            let mut sample_handle = sampled_output.activate();
+                            let mut sample_sesh = sample_handle.session(sampled_cap.as_ref().unwrap());
+                            let mut data_handle = data_output.activate();
+                            let mut data_sesh = data_handle.session(data_cap.as_ref().unwrap());
+                            if let Some(data) = to_sample.get_mut(time.time()) {
+                                if *prob >= 0.0 {
+                                    while let Some(datum) = data.pop() {
+                                        *prob -= datum.0;
+                                        if *prob <= 0.0 {
+                                            sample_sesh.give(datum);
+                                            break;
+                                        } else {
+                                            data_sesh.give(datum);
+                                        }
+                                    }
+                                }
+                                while let Some(datum) = data.pop() {
+                                    data_sesh.give(datum);
+                                }
+                            }
+                            weight.0 = f64::NAN;
+
+                            // downgrade the capabilities
+                            let new_time = smallest_time(&sample_frontier, time.time());
+                            match new_time {
+
+                                Some(t) => {
+                                    sampled_cap.as_mut().unwrap().downgrade(t);
+                                    data_cap.as_mut().unwrap().downgrade(t);
+                                }
+                                None => {
+                                    sampled_cap = None;
+                                    data_cap = None;
+                                }
+                            }
+                        }
+                    }
+                    probs.retain(|_, weight| !weight.0.is_nan());
+                } else {
+                    if let Some(t) = sampled_cap.as_ref() {
+                        if !sample_frontier.less_equal(t) {
+                            sampled_cap = None;
+                            data_cap = None;
+                        }
+                    }
+                }
+            }
+        });
+        (sampled_stream, data_stream)
+    }
 }
 
 // TODO: this operator will need to have data flow control when using lots of data
@@ -99,11 +196,12 @@ impl<G: Scope> SelectSamples<G, (f64, Point), (f64, usize)> for Stream<G, (f64, 
                                     }
                                 }
                             }
-                            weight.0 = -1.0;
+                            weight.0 = f64::NAN;
 
                             // downgrade the capabilities
                             let new_time = smallest_time(&sample_frontier, time.time());
                             match new_time {
+
                                 Some(t) => {
                                     sampled_cap.as_mut().unwrap().downgrade(t);
                                     data_cap.as_mut().unwrap().downgrade(t);
@@ -115,7 +213,7 @@ impl<G: Scope> SelectSamples<G, (f64, Point), (f64, usize)> for Stream<G, (f64, 
                             }
                         }
                     }
-                    rates.retain(|_, weight| weight.0 >= 0.0);
+                    rates.retain(|_, weight| !weight.0.is_nan());
                 } else {
                     if let Some(t) = sampled_cap.as_ref() {
                         if !sample_frontier.less_equal(t) {
@@ -207,7 +305,7 @@ impl<G: Scope> SumLocalDistances<G, (f64, Point), f64> for Stream<G, (f64, Point
                             let mut sum_handle = sum_output.activate();
                             let mut sum_sesh = sum_handle.session(sum_cap.as_ref().unwrap());
                             sum_sesh.give(*sum);
-                            *sum = -1f64;
+                            *sum = f64::NAN;
 
                             // downgrade the capabilities
                             let new_time = smallest_time(&frontier, time);
@@ -223,7 +321,7 @@ impl<G: Scope> SumLocalDistances<G, (f64, Point), f64> for Stream<G, (f64, Point
                             }
                         }
                     }
-                    sums.retain(|_, sum| *sum >= 0.0);
+                    sums.retain(|_, sum| !sum.is_nan());
                 } else {
                     if let Some(t) = pipe_cap.as_ref() {
                         if !frontier.less_equal(t) {

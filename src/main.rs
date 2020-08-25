@@ -75,11 +75,6 @@ fn main() {
             );
         });
 
-        // TODO: two ways to proceed:
-        // 1. do all the summing and such for the centroids as a stream and return
-        // a single value
-        // 2. only do the summing as a stream and collect the result below
-
         for i in 0..1 {
         //     let i = 0;
             println!("worker {} sending round {}", index, i);
