@@ -20,13 +20,11 @@ pub trait SumDistances<G: Scope, D1: Data, D2: Data> {
 }
 
 trait SumLocalDistances<G: Scope, D1: Data, D2: Data> {
-    fn sum_local_distances(&self) -> (Stream<G, D2>, Stream<G, D1>);
+    fn sum_local_squared_distances(&self) -> (Stream<G, D2>, Stream<G, D1>);
 }
 
 trait SumStream<G: Scope, D1: Data> {
     fn sum(&self) -> Stream<G, D1>;
-
-    fn sum_of_squares(&self) -> Stream<G, D1>;
 }
 
 pub trait ClosestNeighbour<G: Scope, D1: Data, D2: Data> {
@@ -67,7 +65,7 @@ impl<G: Scope> SelectSamples<G, (f64, Point), (f64, usize)> for Stream<G, (f64, 
             let mut sampled_cap = caps.pop();
 
             move |frontiers| {
-                if sum_cap.is_none() {
+                if data_cap.is_none() {
                     return;
                 }
                 while let Some((cap, weight)) = ratio_input.next() {
@@ -78,18 +76,16 @@ impl<G: Scope> SelectSamples<G, (f64, Point), (f64, usize)> for Stream<G, (f64, 
                     let incoming_data = to_sample
                         .entry(cap.time().clone())
                         .or_insert_with(Vec::new);
-                    for datum in data {
-                        incoming_data.push(datum);
-                    }
+                    incoming_data.append(&mut data.replace(Vec::new()));
                 }
                 let rates_frontier = &frontiers[0].frontier();
                 let sample_frontier = &frontiers[1].frontier();
                 if !rates.is_empty() {
-                    for (time, weight) in rates.iter() {
+                    for (time, weight) in rates.iter_mut() {
                         if !rates_frontier.less_equal(time.time()) {
 
                             let mut sample_handle = sampled_output.activate();
-                            let mut sample_sesh = sample_handle.session(sample_cap.as_ref().unwrap());
+                            let mut sample_sesh = sample_handle.session(sampled_cap.as_ref().unwrap());
                             let mut data_handle = data_output.activate();
                             let mut data_sesh = data_handle.session(data_cap.as_ref().unwrap());
                             if let Some(data) = to_sample.get_mut(time.time()) {
@@ -103,37 +99,27 @@ impl<G: Scope> SelectSamples<G, (f64, Point), (f64, usize)> for Stream<G, (f64, 
                                     }
                                 }
                             }
+                            weight.0 = -1.0;
 
                             // downgrade the capabilities
-                            let new_time = smallest_time(&rates_frontier, time.time());
+                            let new_time = smallest_time(&sample_frontier, time.time());
                             match new_time {
                                 Some(t) => {
                                     sampled_cap.as_mut().unwrap().downgrade(t);
-                                }
-                                None => {
-                                    samppled_cap = None;
-                                }
-                            }
-                            let new_time = smallest_time(&data_frontier, time.time());
-                            match new_time {
-                                Some(t) => {
                                     data_cap.as_mut().unwrap().downgrade(t);
                                 }
                                 None => {
+                                    sampled_cap = None;
                                     data_cap = None;
                                 }
                             }
                         }
                     }
-                    sums.retain(|_, sum| *sum >= 0.0);
+                    rates.retain(|_, weight| weight.0 >= 0.0);
                 } else {
                     if let Some(t) = sampled_cap.as_ref() {
-                        if !frontier.less_equal(t) {
+                        if !sample_frontier.less_equal(t) {
                             sampled_cap = None;
-                        }
-                    }
-                    if let Some(t) = data_cap.as_ref() {
-                        if !frontier.less_equal(t) {
                             data_cap = None;
                         }
                     }
@@ -172,22 +158,18 @@ impl<G: Scope> SumStream<G, f64> for Stream<G, f64> {
             }
         )
     }
-
-    fn sum_of_squares(&self) -> Stream<G, f64> {
-        self.map(|x| x * x).sum()
-    }
 }
 
 impl<G: Scope> SumDistances<G, (f64, Point), f64> for Stream<G, (f64, Point)> {
     fn sum_square_distances(&self) -> (Stream<G, f64>, Stream<G, (f64, Point)>) {
-        let (sum, piped) = self.sum_local_distances();
-        let glob_sum = sum.exchange(|_| 0).sum_of_squares().broadcast();
+        let (sum, piped) = self.sum_local_squared_distances();
+        let glob_sum = sum.exchange(|_| 0).sum().broadcast();
         (glob_sum, piped)
     }
 }
 
 impl<G: Scope> SumLocalDistances<G, (f64, Point), f64> for Stream<G, (f64, Point)> {
-    fn sum_local_distances(&self) -> (Stream<G, f64>, Stream<G, (f64, Point)>) {
+    fn sum_local_squared_distances(&self) -> (Stream<G, f64>, Stream<G, (f64, Point)>) {
         let mut builder = OperatorBuilder::new("Select local random".to_owned(), self.scope());
 
         // set up the input and output points for this stream
@@ -212,7 +194,7 @@ impl<G: Scope> SumLocalDistances<G, (f64, Point), f64> for Stream<G, (f64, Point
                     let mut pipe_handle = pipe_output.activate();
                     let mut pipe_sesh = pipe_handle.session(pipe_cap.as_ref().unwrap());
                     for val in data.iter() {
-                        *sum += val.0;
+                        *sum += val.0.powi(2);
                         pipe_sesh.give(*val);
                     }
                 }
@@ -326,7 +308,7 @@ fn smallest_time<'r, 'a, T: 'a + Ord + PartialOrder + Clone>(
     chain.iter().for_each(|v| {
         if !v.less_equal(larger_than) && smallest.is_none() {
             smallest = Some(v);
-        } else if v.less_than(smallest.as_ref().unwrap()) {
+        } else if !smallest.is_none() && v.less_than(smallest.as_ref().unwrap()) {
             smallest = Some(v);
         }
     });

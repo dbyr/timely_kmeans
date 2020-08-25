@@ -15,6 +15,7 @@ use traditional::{SelectRandom, ClosestNeighbour, SumDistances};
 use timely::dataflow::operators::{Input, Inspect, Probe, Map};
 use timely::dataflow::{InputHandle, ProbeHandle};
 use std::f64;
+use crate::traditional::SelectSamples;
 
 /*
 Potential solution:
@@ -56,13 +57,22 @@ fn main() {
                 );
                 // .probe_with(&mut distance_probe);
 
-            let (summed, _piped) = initial_distanced.sum_square_distances();
+            let (summed, piped) = initial_distanced.sum_square_distances();
             summed
                 .inspect_batch(move |t, v|
                     v.iter().for_each(|x| println!("sum to {} at {:?}", x, t))
                 )
                 .probe_with(&mut sum_probe);
 
+            let (sampled, data) =
+                piped.sample_data(&summed.map(|v| (v, 3usize)));
+
+            sampled.inspect_batch(move |t, v|
+                v.iter().for_each(|x|println!("sampled {:?} at time {:?}", x.1, t))
+            );
+            data.inspect_batch(move |t, v|
+                v.iter().for_each(|x|println!("passed {:?} at time {:?}", x.1, t))
+            );
         });
 
         // TODO: two ways to proceed:
