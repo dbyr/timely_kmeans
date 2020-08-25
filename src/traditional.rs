@@ -55,7 +55,7 @@ impl<G: Scope> SelectWeightedInitial<G, (f64, Point), f64> for Stream<G, (f64, P
 
         // set up the input and output points for this stream
         let mut data_input = builder.new_input(self, Pipeline);
-        let mut ratio_input = builder.new_input(selection_ratios, Pipeline);
+        let mut ratio_input = builder.new_input(sums, Pipeline);
         let (mut sampled_output, sampled_stream) = builder.new_output();
         let (mut data_output, data_stream) = builder.new_output();
         let mut generator = rand::thread_rng();
@@ -81,11 +81,10 @@ impl<G: Scope> SelectWeightedInitial<G, (f64, Point), f64> for Stream<G, (f64, P
                         .or_insert_with(Vec::new);
                     incoming_data.append(&mut data.replace(Vec::new()));
                 }
-                let rates_frontier = &frontiers[0].frontier();
-                let sample_frontier = &frontiers[1].frontier();
+                let sample_frontier = &frontiers[0].frontier();
                 if !probs.is_empty() {
                     for (time, prob) in probs.iter_mut() {
-                        if !rates_frontier.less_equal(time.time()) {
+                        if !sample_frontier.less_equal(time.time()) {
 
                             let mut sample_handle = sampled_output.activate();
                             let mut sample_sesh = sample_handle.session(sampled_cap.as_ref().unwrap());
@@ -94,7 +93,7 @@ impl<G: Scope> SelectWeightedInitial<G, (f64, Point), f64> for Stream<G, (f64, P
                             if let Some(data) = to_sample.get_mut(time.time()) {
                                 if *prob >= 0.0 {
                                     while let Some(datum) = data.pop() {
-                                        *prob -= datum.0;
+                                        *prob -= datum.0.powi(2);
                                         if *prob <= 0.0 {
                                             sample_sesh.give(datum);
                                             break;
@@ -107,7 +106,7 @@ impl<G: Scope> SelectWeightedInitial<G, (f64, Point), f64> for Stream<G, (f64, P
                                     data_sesh.give(datum);
                                 }
                             }
-                            weight.0 = f64::NAN;
+                            *prob = f64::NAN;
 
                             // downgrade the capabilities
                             let new_time = smallest_time(&sample_frontier, time.time());
@@ -124,7 +123,7 @@ impl<G: Scope> SelectWeightedInitial<G, (f64, Point), f64> for Stream<G, (f64, P
                             }
                         }
                     }
-                    probs.retain(|_, weight| !weight.0.is_nan());
+                    probs.retain(|_, prob| !prob.is_nan());
                 } else {
                     if let Some(t) = sampled_cap.as_ref() {
                         if !sample_frontier.less_equal(t) {
@@ -175,11 +174,10 @@ impl<G: Scope> SelectSamples<G, (f64, Point), (f64, usize)> for Stream<G, (f64, 
                         .or_insert_with(Vec::new);
                     incoming_data.append(&mut data.replace(Vec::new()));
                 }
-                let rates_frontier = &frontiers[0].frontier();
-                let sample_frontier = &frontiers[1].frontier();
+                let sample_frontier = &frontiers[0].frontier();
                 if !rates.is_empty() {
                     for (time, weight) in rates.iter_mut() {
-                        if !rates_frontier.less_equal(time.time()) {
+                        if !sample_frontier.less_equal(time.time()) {
 
                             let mut sample_handle = sampled_output.activate();
                             let mut sample_sesh = sample_handle.session(sampled_cap.as_ref().unwrap());

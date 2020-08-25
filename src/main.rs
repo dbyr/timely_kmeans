@@ -15,7 +15,7 @@ use traditional::{SelectRandom, ClosestNeighbour, SumDistances};
 use timely::dataflow::operators::{Input, Inspect, Probe, Map};
 use timely::dataflow::{InputHandle, ProbeHandle};
 use std::f64;
-use crate::traditional::SelectSamples;
+use crate::traditional::{SelectSamples, SelectWeightedInitial};
 
 /*
 Potential solution:
@@ -65,7 +65,8 @@ fn main() {
                 .probe_with(&mut sum_probe);
 
             let (sampled, data) =
-                piped.sample_data(&summed.map(|v| (v, 3usize)));
+                piped.select_weighted_initial(&summed);
+                // piped.sample_data(&summed.map(|v| (v, 3usize)));
 
             sampled.inspect_batch(move |t, v|
                 v.iter().for_each(|x|println!("sampled {:?} at time {:?}", x.1, t))
