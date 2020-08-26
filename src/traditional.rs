@@ -46,6 +46,120 @@ trait SelectLocalRandom<G: Scope, D1: Data, D2: Data> {
     fn select_local_random(&self) -> (Stream<G, D1>, Stream<G, D2>);
 }
 
+trait UpdateCategories<G: Scope, D1: Data, D2: Data> {
+    fn update_categories(&self, cats: &Stream<G, D2>) -> (Option<Stream<G, D1>>, Stream<G, D2>);
+}
+
+impl<G: Scope> UpdateCategories<G, (f64, Point), Vec<Point>> for Stream<G, (f64, Point)> {
+    fn update_categories(&self, cats: &Stream<G, Vec<Point>>)
+        -> (Option<Stream<G, (f64, Point)>>, Stream<G, Vec<Point>>)
+    {
+        let mut builder = OperatorBuilder::new("Select samples".to_owned(), self.scope());
+
+        // set up the input and output points for this stream
+        let mut data_input = builder.new_input(self, Pipeline);
+        let mut cats_input = builder.new_input(cats, Pipeline);
+        let (mut cats_output, cats_stream) = builder.new_output();
+        let (mut data_output, data_stream) = builder.new_output();
+
+        let mut proceed = false;
+
+        // builds the operator
+        builder.build(move |mut caps| {
+            let mut old_cats = HashMap::new();
+            let mut new_cats = HashMap::new();
+            let mut to_sample = HashMap::new();
+            let mut data_cap = caps.pop();
+            let mut cats_cap = caps.pop();
+
+            move |frontiers| {
+                if data_cap.is_none() {
+                    return;
+                }
+                while let Some((cap, mut weight)) = cats_input.next() {
+                    let time = cap.time().clone();
+                    let cats = old_cats.entry(cap.retain())
+                        .or_insert_with(Vec::new);
+                    *cats = weight.get(0).unwrap().clone();
+                    new_cats.insert(time, vec!((Point::origin(), 0); cats.len()));
+                }
+                while let Some((cap, data)) = data_input.next() {
+                    let incoming_data = to_sample
+                        .entry(cap.time().clone())
+                        .or_insert_with(Vec::new);
+                    incoming_data.append(&mut data.replace(Vec::new()));
+                }
+                let data_frontier = &frontiers[0].frontier();
+                if !old_cats.is_empty() {
+                    for (time, cats) in old_cats.iter_mut() {
+                        if !data_frontier.less_equal(time.time()) {
+
+                            let mut cats_handle = cats_output.activate();
+                            let mut cats_sesh = cats_handle.session(cats_cap.as_ref().unwrap());
+                            let mut data_handle = data_output.activate();
+                            let mut data_sesh = data_handle.session(data_cap.as_ref().unwrap());
+                            let new_cat_list = new_cats.get_mut(time.time()).unwrap();
+                            if let Some(data) = to_sample.get_mut(time.time()) {
+                                while let Some(mut datum) = data.pop() {
+                                    datum.0 = f64::MAX;
+                                    let mut cat_i = 0;
+                                    for (i, cat) in cats.iter().enumerate() {
+                                        let new_dist = datum.1.distance(cat);
+                                        if new_dist < datum.0 {
+                                            datum.0 = new_dist;
+                                            cat_i = i;
+                                        }
+                                    }
+                                    new_cat_list[cat_i].0 = new_cat_list[cat_i].0.add(&datum.1);
+                                    new_cat_list[cat_i].1 += 1;
+                                    data_sesh.give(datum);
+                                }
+                            }
+                            let mut cats_new = Vec::new();
+                            for (cat_old, cat_new)
+                            in cats.iter().zip(new_cat_list.iter()) {
+                                let new_cat = cat_new.0.scalar_div(cat_new.1 as f64);
+                                if new_cat == *cat_old {
+                                    proceed = true;
+                                }
+                                cats_new.push(new_cat);
+                            }
+                            *cats = Vec::new();
+
+                            // downgrade the capabilities
+                            let new_time = smallest_time(&data_frontier, time.time());
+                            match new_time {
+
+                                Some(t) => {
+                                    cats_cap.as_mut().unwrap().downgrade(t);
+                                    data_cap.as_mut().unwrap().downgrade(t);
+                                }
+                                None => {
+                                    cats_cap = None;
+                                    data_cap = None;
+                                }
+                            }
+                        }
+                    }
+                    old_cats.retain(|_, prob| !prob.is_empty());
+                } else {
+                    if let Some(t) = data_cap.as_ref() {
+                        if !data_frontier.less_equal(t) {
+                            cats_cap = None;
+                            data_cap = None;
+                        }
+                    }
+                }
+            }
+        });
+        if proceed {
+            (Some(data_stream), cats_stream)
+        } else {
+            (None, cats_stream)
+        }
+    }
+}
+
 // TODO: this operator will need to have data flow control when using lots of data
 impl<G: Scope> SelectWeightedInitial<G, (f64, Point), f64> for Stream<G, (f64, Point)> {
     fn select_weighted_initial(&self, sums: &Stream<G, f64>)
