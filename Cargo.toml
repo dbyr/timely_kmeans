@@ -7,5 +7,6 @@ edition = "2018"
 [dependencies]
 rand = "0.7.3"
 timely = "*"
+timely_communication = "*"
 abomonation = "*"
 abomonation_derive = "*"
