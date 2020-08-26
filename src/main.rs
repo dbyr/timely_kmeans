@@ -10,12 +10,13 @@ mod traditional;
 mod sampler;
 
 use point::Point;
-use traditional::{SelectRandom, ClosestNeighbour, SumDistances};
+use traditional::{SelectRandom, ClosestNeighbour, SumDistances, UpdateCategories};
 // use sampler::SampleData;
-use timely::dataflow::operators::{Input, Inspect, Probe, Map};
+use timely::dataflow::operators::{Input, Inspect, Probe, Map, Accumulate, Concat};
 use timely::dataflow::{InputHandle, ProbeHandle};
 use std::f64;
 use crate::traditional::{SelectSamples, SelectWeightedInitial};
+use crate::euclidean_distance::EuclideanDistance;
 
 /*
 Potential solution:
@@ -49,6 +50,7 @@ fn main() {
             //     );
 
             // calculate the distance for the randomly selected point
+            let categories = sampled.clone();
             let initial_distanced = data
                 .map(|p| (f64::MAX, p))
                 .closest_neighbour(&sampled)
@@ -64,15 +66,30 @@ fn main() {
                 )
                 .probe_with(&mut sum_probe);
 
-            let (sampled, data) =
+            let (mut sampled, mut data) =
                 piped.select_weighted_initial(&summed);
                 // piped.sample_data(&summed.map(|v| (v, 3usize)));
 
-            sampled.inspect_batch(move |t, v|
-                v.iter().for_each(|x|println!("sampled {:?} at time {:?}", x.1, t))
+            let cats = sampled.map(|v| v.1)
+                .concat(&categories)
+                .inspect_batch(move |t, v|
+                v.iter().for_each(|x|println!("sampled {:?} at time {:?}", x, t))
+            ).accumulate(
+                Vec::new(),
+                |cats: &mut Vec<Point>,
+                 data: timely_communication::message::RefOrMut<Vec<Point>>| {
+                    for datum in data.iter() {
+                        cats.push(*datum);
+                    }
+                }
             );
-            data.inspect_batch(move |t, v|
+            data = data.inspect_batch(move |t, v|
                 v.iter().for_each(|x|println!("passed {:?} at time {:?}", x.1, t))
+            );
+
+            let (_reuse, new_cats) = data.update_categories(&cats);
+            new_cats.inspect_batch(move |t, v|
+                v.iter().for_each(|x|println!("cat {:?} at time {:?}", x, t))
             );
         });
 

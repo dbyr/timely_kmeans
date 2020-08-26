@@ -46,7 +46,7 @@ trait SelectLocalRandom<G: Scope, D1: Data, D2: Data> {
     fn select_local_random(&self) -> (Stream<G, D1>, Stream<G, D2>);
 }
 
-trait UpdateCategories<G: Scope, D1: Data, D2: Data> {
+pub trait UpdateCategories<G: Scope, D1: Data, D2: Data> {
     fn update_categories(&self, cats: &Stream<G, D2>) -> (Option<Stream<G, D1>>, Stream<G, D2>);
 }
 
@@ -124,6 +124,7 @@ impl<G: Scope> UpdateCategories<G, (f64, Point), Vec<Point>> for Stream<G, (f64,
                                 }
                                 cats_new.push(new_cat);
                             }
+                            cats_sesh.give(cats_new);
                             *cats = Vec::new();
 
                             // downgrade the capabilities
