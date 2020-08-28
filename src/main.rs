@@ -87,8 +87,9 @@ fn main() {
                 v.iter().for_each(|x|println!("passed {:?} at time {:?}", x.1, t))
             );
 
-            let (_reuse, new_cats) = data.update_categories(&cats);
-            new_cats.inspect_batch(move |t, v|
+            let (reuse, mut new_cats) = data
+                .update_categories(&cats);
+            new_cats = new_cats.inspect_batch(move |t, v|
                 v.iter().for_each(|x|println!("cat {:?} at time {:?}", x, t))
             );
         });

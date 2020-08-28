@@ -7,13 +7,35 @@ use std::borrow::ToOwned;
 use timely::dataflow::operators::generic::builder_rc::OperatorBuilder;
 use timely::progress::frontier::AntichainRef;
 use rand::{Rng, thread_rng};
-use timely::dataflow::operators::{Operator, Exchange, Broadcast, Map, Concat};
+use timely::dataflow::operators::{Operator, Exchange, Broadcast, Map, Concat, Accumulate};
 use timely::dataflow::{
     Stream,
     Scope
 };
 
 use crate::euclidean_distance::EuclideanDistance;
+
+pub trait KMeansPPInitialise<G: Scope, D1: Data, D2: Data> {
+    fn kmeans_pp_initialise(&self, cats: usize) -> (Stream<G, D1>, Stream<G, D2>);
+}
+
+pub trait ScalableInitialise<G: Scope, D1: Data, D2: Data> {
+    fn scalable_initialise(&self, cats: usize) -> (Stream<G, D1>, Stream<G, D2>);
+}
+
+pub trait LloydsIteration<G: Scope, D1: Data> {
+    fn lloyds_iteration(&self, cats: &Stream<G, D1>) -> Stream<G, D1>;
+}
+
+// impl<G: Scope> KMeansPPInitialise<G, (f64, Point), Vec<Point>> for Stream<G, Point> {
+//     fn kmeans_pp_initialise(&self, cats: usize) -> (Stream<G, (f64, Point)>, Stream<G, Vec<Point>>) {
+//         let (mut cats, raw_data) = self.select_random();
+//         let initial = cats.clone();
+//         let mut data = raw_data
+//             .map(|v| (f64::MAX, v)).closest_neighbour(&cats);
+//         let result = data.select_weighted_initial_local();
+//     }
+// }
 
 pub trait SumDistances<G: Scope, D1: Data, D2: Data> {
     fn sum_square_distances(&self) -> (Stream<G, D2>, Stream<G, D1>);
@@ -35,8 +57,16 @@ pub trait SelectSamples<G: Scope, D1: Data, D2: Data> {
     fn sample_data(&self, selection_ratios: &Stream<G, D2>) -> (Stream<G, D1>, Stream<G, D1>);
 }
 
+trait SelectSamplesLocal<G: Scope, D1: Data, D2: Data> {
+    fn sample_data_local(&self, selection_ratios: &Stream<G, D2>) -> (Stream<G, D1>, Stream<G, D1>);
+}
+
 pub trait SelectWeightedInitial<G: Scope, D1: Data, D2: Data> {
     fn select_weighted_initial(&self, sums: &Stream<G, D2>) -> (Stream<G, D1>, Stream<G, D1>);
+}
+
+trait SelectWeightedInitialLocal<G: Scope, D1: Data, D2: Data> {
+    fn select_weighted_initial_local(&self, sums: &Stream<G, D2>) -> (Stream<G, D1>, Stream<G, D1>);
 }
 
 pub trait SelectRandom<G: Scope, D1: Data, D2: Data> {
@@ -46,13 +76,90 @@ trait SelectLocalRandom<G: Scope, D1: Data, D2: Data> {
     fn select_local_random(&self) -> (Stream<G, D1>, Stream<G, D2>);
 }
 
-pub trait UpdateCategories<G: Scope, D1: Data, D2: Data> {
-    fn update_categories(&self, cats: &Stream<G, D2>) -> (Option<Stream<G, D1>>, Stream<G, D2>);
+pub trait UpdateCategories<G: Scope, D1: Data, D2: Data, D3: Data> {
+    fn update_categories(&self, cats: &Stream<G, D2>) -> (Stream<G, D1>, Stream<G, D3>);
 }
 
-impl<G: Scope> UpdateCategories<G, (f64, Point), Vec<Point>> for Stream<G, (f64, Point)> {
+trait UpdateCategoriesLocal<G: Scope, D1: Data, D2: Data, D3: Data> {
+    fn update_categories_local(&self, cats: &Stream<G, D2>) -> (Stream<G, D1>, Stream<G, D3>);
+}
+
+impl<G: Scope> UpdateCategories<G, (f64, Point), Vec<Point>, Vec<(bool, Point)>>
+for Stream<G, (f64, Point)> {
     fn update_categories(&self, cats: &Stream<G, Vec<Point>>)
-        -> (Option<Stream<G, (f64, Point)>>, Stream<G, Vec<Point>>)
+                               -> (Stream<G, (f64, Point)>, Stream<G, Vec<(bool, Point)>>)
+    {
+        let cat_compare = cats.clone();
+        let (data, new_cats) =
+            self.update_categories_local(cats);
+        let glob_new_cats = new_cats
+            .exchange(|_| 0)
+            .accumulate(
+            vec!(),
+            |sums, data|
+                for v in data.iter() {
+                    if sums.is_empty() {
+                        *sums = vec!((Point::origin(), 0); v.len());
+                    }
+                    for (i, pair) in v.iter().enumerate() {
+                        sums[i].0 = sums[i].0.add(&pair.0);
+                        sums[i].1 += pair.1;
+                    }
+                }
+            )
+            .broadcast();
+
+        let result = glob_new_cats.binary_frontier(
+            &cat_compare,
+            Pipeline,
+            Pipeline,
+            "Compare new categories with old",
+            |_, _| {
+                let mut old_cats = HashMap::new();
+                let mut new_cats = HashMap::new();
+                move |in_new, in_old, out| {
+                    while let Some((cap, mut dat)) = in_new.next() {
+                        new_cats.insert(cap.retain(), dat[0].clone());
+                    }
+                    while let Some((cap, mut dat)) = in_old.next() {
+                        old_cats.insert(cap.retain(), Some(dat[0].clone()));
+                    }
+                    for (time, old_cats_opt) in old_cats.iter_mut() {
+                        let old_cats = old_cats_opt.as_ref().unwrap();
+                        if !in_new.frontier().less_equal(time.time()) {
+                            let mut sesh = out.session(time);
+                            let mut results = vec!();
+                            if let Some(new_cats) = new_cats.remove(time) {
+                                for (old, new) in old_cats.iter().zip(new_cats.iter()) {
+                                    let new_cat = new.0.scalar_div(new.1 as f64);
+                                    if new_cat == *old {
+                                        results.push((false, new_cat));
+                                    } else {
+                                        results.push((true, new_cat));
+                                    }
+                                }
+                            }
+                            sesh.give(results);
+                            *old_cats_opt = None;
+                        }
+                    }
+                    old_cats.retain(|_, h| !h.is_none());
+                }
+            }
+        );
+
+        (data, result)
+    }
+}
+// Input: Stream of points and distance to their previous closest categories
+// and a second stream containing a vec of available categories
+// Output: An equivalent (but updated) stream to the "self" input
+// and a second stream of new categories and whether or not they changed
+// from the given input categories
+impl<G: Scope> UpdateCategoriesLocal<G, (f64, Point), Vec<Point>, Vec<(Point, usize)>>
+for Stream<G, (f64, Point)> {
+    fn update_categories_local(&self, cats: &Stream<G, Vec<Point>>)
+        -> (Stream<G, (f64, Point)>, Stream<G, Vec<(Point, usize)>>)
     {
         let mut builder = OperatorBuilder::new("Select samples".to_owned(), self.scope());
 
@@ -61,8 +168,6 @@ impl<G: Scope> UpdateCategories<G, (f64, Point), Vec<Point>> for Stream<G, (f64,
         let mut cats_input = builder.new_input(cats, Pipeline);
         let (mut cats_output, cats_stream) = builder.new_output();
         let (mut data_output, data_stream) = builder.new_output();
-
-        let mut proceed = false;
 
         // builds the operator
         builder.build(move |mut caps| {
@@ -115,14 +220,9 @@ impl<G: Scope> UpdateCategories<G, (f64, Point), Vec<Point>> for Stream<G, (f64,
                                     data_sesh.give(datum);
                                 }
                             }
-                            let mut cats_new = Vec::new();
-                            for (cat_old, cat_new)
-                            in cats.iter().zip(new_cat_list.iter()) {
-                                let new_cat = cat_new.0.scalar_div(cat_new.1 as f64);
-                                if new_cat == *cat_old {
-                                    proceed = true;
-                                }
-                                cats_new.push(new_cat);
+                            let mut cats_new = vec!();
+                            for (point, sum) in new_cat_list {
+                                cats_new.push((*point, *sum));
                             }
                             cats_sesh.give(cats_new);
                             *cats = Vec::new();
@@ -153,17 +253,30 @@ impl<G: Scope> UpdateCategories<G, (f64, Point), Vec<Point>> for Stream<G, (f64,
                 }
             }
         });
-        if proceed {
-            (Some(data_stream), cats_stream)
-        } else {
-            (None, cats_stream)
-        }
+        (data_stream, cats_stream)
+    }
+}
+
+impl<G: Scope> SelectWeightedInitial<G, (f64, Point), f64> for Stream<G, (f64, Point)> {
+    fn select_weighted_initial(&self, sums: &Stream<G, f64>)
+                                     -> (Stream<G, (f64, Point)>, Stream<G, (f64, Point)>)
+    {
+        let (sampled, data) = self
+            .select_weighted_initial_local(sums);
+        let (sub_sums, sampled) = sampled
+            .exchange(|_| 0)
+            .sum_local_squared_distances();
+        let (mut glob_sampled, rejected) = sampled
+            .select_weighted_initial_local(&sub_sums);
+        glob_sampled = glob_sampled.broadcast();
+        (glob_sampled, data.concat(&rejected))
     }
 }
 
 // TODO: this operator will need to have data flow control when using lots of data
-impl<G: Scope> SelectWeightedInitial<G, (f64, Point), f64> for Stream<G, (f64, Point)> {
-    fn select_weighted_initial(&self, sums: &Stream<G, f64>)
+// left is the sampled value, right is the passed on data
+impl<G: Scope> SelectWeightedInitialLocal<G, (f64, Point), f64> for Stream<G, (f64, Point)> {
+    fn select_weighted_initial_local(&self, sums: &Stream<G, f64>)
         -> (Stream<G, (f64, Point)>, Stream<G, (f64, Point)>)
     {
         let mut builder = OperatorBuilder::new("Select samples".to_owned(), self.scope());
@@ -253,10 +366,21 @@ impl<G: Scope> SelectWeightedInitial<G, (f64, Point), f64> for Stream<G, (f64, P
     }
 }
 
-// TODO: this operator will need to have data flow control when using lots of data
-// ratios are (sum_of_distances_squared, number_of_categories)
 impl<G: Scope> SelectSamples<G, (f64, Point), (f64, usize)> for Stream<G, (f64, Point)> {
     fn sample_data(&self, selection_ratios: &Stream<G, (f64, usize)>)
+                   -> (Stream<G, (f64, Point)>, Stream<G, (f64, Point)>)
+    {
+        let (sampled, data) =
+            self.sample_data_local(selection_ratios);
+        (sampled.broadcast(), data)
+    }
+}
+
+// TODO: this operator will need to have data flow control when using lots of data
+// ratios are (sum_of_distances_squared, number_of_categories)
+// left is sampled, right is passed on data
+impl<G: Scope> SelectSamplesLocal<G, (f64, Point), (f64, usize)> for Stream<G, (f64, Point)> {
+    fn sample_data_local(&self, selection_ratios: &Stream<G, (f64, usize)>)
         -> (Stream<G, (f64, Point)>, Stream<G, (f64, Point)>)
     {
         let mut builder = OperatorBuilder::new("Select samples".to_owned(), self.scope());
