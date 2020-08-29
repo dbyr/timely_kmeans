@@ -38,12 +38,17 @@ fn main() {
 
         // select the initial random point
         worker.dataflow(|scope| {
-            let (sampled, data) =
+            let (mut sampled, mut data) =
                 scope.input_from(&mut input).select_random(index.clone());
-            sampled
+            sampled = sampled
                 .inspect_batch(move |t, x|
                     x.iter().for_each(move |v| println!("worker {} sampled: {:?} w/ t={:?}", index.clone(), v, t))
                 );
+            data = data
+                .inspect_batch(move |t, x|
+                    x.iter().for_each(move |v| println!("worker {} passed on: {:?} w/ t={:?}", index.clone(), v, t))
+                );
+
                 // .probe_with(&mut initial_probe);
             // data
             //     .inspect_batch(move |t, x|

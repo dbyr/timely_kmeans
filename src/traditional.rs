@@ -260,6 +260,7 @@ for Stream<G, (f64, Point)> {
                         .or_insert_with(Vec::new);
                     incoming_data.append(&mut data.replace(Vec::new()));
                 }
+                // TODO: Make sure both frontiers are taken into account
                 let data_frontier = &frontiers[0].frontier();
                 if !old_cats.is_empty() {
                     for (time, cats) in old_cats.iter_mut() {
@@ -362,11 +363,8 @@ impl<G: Scope> SelectWeightedInitialLocal<G, (f64, Point), f64> for Stream<G, (f
             let mut sampled_cap = caps.pop();
 
             move |frontiers| {
-                if data_cap.is_none() {
-                    return;
-                }
                 while let Some((cap, weight)) = ratio_input.next() {
-                    let rate = probs.entry(cap.retain()).or_insert(0f64);
+                    let rate = probs.entry(cap.time().clone()).or_insert(0f64);
                     *rate = generator.gen_range(0.0, weight[0]);
                 }
                 while let Some((cap, data)) = data_input.next() {
@@ -375,17 +373,19 @@ impl<G: Scope> SelectWeightedInitialLocal<G, (f64, Point), f64> for Stream<G, (f
                         .or_insert_with(Vec::new);
                     incoming_data.append(&mut data.replace(Vec::new()));
                 }
-                let sample_frontier = &frontiers[0].frontier();
+                let ratio_frontier = &frontiers[1].frontier();
+                let data_frontier = &frontiers[0].frontier();
                 if !probs.is_empty() {
                     for (time, prob) in probs.iter_mut() {
-                        if !sample_frontier.less_equal(time.time()) {
+                        if !data_frontier.less_equal(sampled_cap.as_ref().unwrap().time())
+                         && !ratio_frontier.less_equal(sampled_cap.as_ref().unwrap().time()) {
 
                             let mut sample_handle = sampled_output.activate();
                             let mut sample_sesh = sample_handle.session(sampled_cap.as_ref().unwrap());
                             let mut data_handle = data_output.activate();
                             let mut data_sesh = data_handle.session(data_cap.as_ref().unwrap());
-                            if let Some(data) = to_sample.get_mut(time.time()) {
-                                if *prob >= 0.0 {
+                            if let Some(data) = to_sample.get_mut(time) {
+                                if *prob > 0.0 {
                                     while let Some(datum) = data.pop() {
                                         *prob -= datum.0.powi(2);
                                         if *prob <= 0.0 {
@@ -403,7 +403,8 @@ impl<G: Scope> SelectWeightedInitialLocal<G, (f64, Point), f64> for Stream<G, (f
                             *prob = f64::NAN;
 
                             // downgrade the capabilities
-                            let new_time = smallest_time(&sample_frontier, time.time());
+                            let new_time =
+                                smallest_time(&data_frontier, sampled_cap.as_ref().unwrap().time());
                             match new_time {
 
                                 Some(t) => {
@@ -418,12 +419,14 @@ impl<G: Scope> SelectWeightedInitialLocal<G, (f64, Point), f64> for Stream<G, (f
                         }
                     }
                     probs.retain(|_, prob| !prob.is_nan());
-                } else {
-                    if let Some(t) = sampled_cap.as_ref() {
-                        if !sample_frontier.less_equal(t) {
-                            sampled_cap = None;
-                            data_cap = None;
-                        }
+                } else if let (Some(t0), Some(t1)) =
+                            (sampled_cap.as_ref(), data_cap.as_ref()) {
+                    if !data_frontier.less_equal(t0)
+                    && !data_frontier.less_equal(t1)
+                    && !ratio_frontier.less_equal(t0)
+                    && !ratio_frontier.less_equal(t1) {
+                        sampled_cap = None;
+                        data_cap = None;
                     }
                 }
             }
@@ -517,12 +520,10 @@ impl<G: Scope> SelectSamplesLocal<G, (f64, Point), (f64, usize)> for Stream<G, (
                         }
                     }
                     rates.retain(|_, weight| !weight.0.is_nan());
-                } else {
-                    if let Some(t) = sampled_cap.as_ref() {
-                        if !sample_frontier.less_equal(t) {
-                            sampled_cap = None;
-                            data_cap = None;
-                        }
+                } else if let Some(t) = sampled_cap.as_ref() {
+                    if !sample_frontier.less_equal(t) {
+                        sampled_cap = None;
+                        data_cap = None;
                     }
                 }
             }
