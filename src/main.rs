@@ -13,9 +13,10 @@ use point::Point;
 use traditional::{SelectRandom, ClosestNeighbour, SumDistances, UpdateCategories};
 // use sampler::SampleData;
 use timely::dataflow::operators::{Input, Inspect, Probe, Map, Accumulate, Concat};
+use timely::dataflow::operators::capture::replay::Replay;
 use timely::dataflow::{InputHandle, ProbeHandle};
 use std::f64;
-use crate::traditional::{SelectSamples, SelectWeightedInitial};
+use crate::traditional::{SelectSamples, SelectWeightedInitial, DuplicateStream, CreateCategories};
 use crate::euclidean_distance::EuclideanDistance;
 
 /*
@@ -50,14 +51,13 @@ fn main() {
             //     );
 
             // calculate the distance for the randomly selected point
-            let categories = sampled.clone();
+            let (sampled, categories) = sampled.duplicate();
             let initial_distanced = data
                 .map(|p| (f64::MAX, p))
                 .closest_neighbour(&sampled)
                 .inspect_batch(move |t, v|
                     v.iter().for_each(|x|println!("{:?} is {} away at time {:?}", x.1, x.0, t))
                 );
-                // .probe_with(&mut distance_probe);
 
             let (summed, piped) = initial_distanced.sum_square_distances();
             summed
@@ -68,21 +68,17 @@ fn main() {
 
             let (mut sampled, mut data) =
                 piped.select_weighted_initial(&summed);
+            sampled = sampled
+                .inspect_batch(move |t, v|
+                v.iter().for_each(|x|println!("weighted sample {:?} at {:?}", x.1, t))
+            );
                 // piped.sample_data(&summed.map(|v| (v, 3usize)));
 
             let cats = sampled.map(|v| v.1)
                 .concat(&categories)
                 .inspect_batch(move |t, v|
                 v.iter().for_each(|x|println!("sampled {:?} at time {:?}", x, t))
-            ).accumulate(
-                Vec::new(),
-                |cats: &mut Vec<Point>,
-                 data: timely_communication::message::RefOrMut<Vec<Point>>| {
-                    for datum in data.iter() {
-                        cats.push(*datum);
-                    }
-                }
-            );
+            ).create_categories();
             data = data.inspect_batch(move |t, v|
                 v.iter().for_each(|x|println!("passed {:?} at time {:?}", x.1, t))
             );

@@ -7,7 +7,7 @@ use std::borrow::ToOwned;
 use timely::dataflow::operators::generic::builder_rc::OperatorBuilder;
 use timely::progress::frontier::AntichainRef;
 use rand::{Rng, thread_rng};
-use timely::dataflow::operators::{Operator, Exchange, Broadcast, Map, Concat, Accumulate};
+use timely::dataflow::operators::{Operator, Exchange, Broadcast, Map, Concat, Accumulate, Inspect};
 use timely::dataflow::{
     Stream,
     Scope
@@ -84,14 +84,80 @@ trait UpdateCategoriesLocal<G: Scope, D1: Data, D2: Data, D3: Data> {
     fn update_categories_local(&self, cats: &Stream<G, D2>) -> (Stream<G, D1>, Stream<G, D3>);
 }
 
+pub trait CreateCategories<G: Scope, D1: Data> {
+    fn create_categories(&self) -> Stream<G, Vec<D1>>;
+}
+
+pub trait DuplicateStream<G: Scope, D1: Data> {
+    fn duplicate(&self) -> (Stream<G, D1>, Stream<G, D1>);
+}
+
+impl<G: Scope, D1: Data + Clone> DuplicateStream<G, D1> for Stream<G, D1> {
+    fn duplicate(&self) -> (Stream<G, D1>, Stream<G, D1>) {
+        let mut builder = OperatorBuilder::new("Select samples".to_owned(), self.scope());
+
+        // set up the input and output points for this stream
+        let mut input = builder.new_input(self, Pipeline);
+        let (mut output0, stream0) = builder.new_output();
+        let (mut output1, stream1) = builder.new_output();
+
+        // builds the operator
+        builder.build(move |_| {
+            move |_| {
+                while let Some((cap, data)) = input.next() {
+                    let mut handle0 = output0.activate();
+                    let mut sesh0 = handle0.session(&cap);
+                    let mut handle1 = output1.activate();
+                    let mut sesh1 = handle1.session(&cap);
+                    for datum in data.iter() {
+                        sesh0.give(datum.clone());
+                        sesh1.give(datum.clone());
+                    }
+                }
+            }
+        });
+        (stream0, stream1)
+    }
+}
+
+impl<G: Scope> CreateCategories<G, Point> for Stream<G, Point> {
+    fn create_categories(&self) -> Stream<G, Vec<Point>> {
+        self.unary_frontier(
+            Pipeline,
+            "Create categories",
+            |_, _| {
+                let mut cats = HashMap::new();
+                move |input, output| {
+                    while let Some((cap, points)) = input.next() {
+                        let mut now_cats =
+                            cats.entry(cap.retain()).or_insert_with(Vec::new);
+                        for point in points.iter() {
+                            now_cats.push(*point);
+                        }
+                    }
+                    for (time, cats) in cats.iter_mut() {
+                        if !input.frontier().less_equal(time.time()) {
+                            let mut out = Vec::new();
+                            let mut session = output.session(time);
+                            std::mem::swap(&mut out, cats);
+                            session.give(out);
+                        }
+                    }
+                    cats.retain(|_, v| !v.is_empty());
+                }
+            }
+        )
+    }
+}
+
 impl<G: Scope> UpdateCategories<G, (f64, Point), Vec<Point>, Vec<(bool, Point)>>
 for Stream<G, (f64, Point)> {
     fn update_categories(&self, cats: &Stream<G, Vec<Point>>)
                                -> (Stream<G, (f64, Point)>, Stream<G, Vec<(bool, Point)>>)
     {
-        let cat_compare = cats.clone();
-        let (data, new_cats) =
-            self.update_categories_local(cats);
+        let (cat_compare, cat_update) = cats.duplicate();
+        let (data, mut new_cats) =
+            self.update_categories_local(&cat_update);
         let glob_new_cats = new_cats
             .exchange(|_| 0)
             .accumulate(
@@ -581,7 +647,8 @@ impl<G: Scope> SumLocalDistances<G, (f64, Point), f64> for Stream<G, (f64, Point
 // https://timelydataflow.github.io/timely-dataflow/chapter_4/chapter_4_3.html#flow-control
 impl<G: Scope> ClosestNeighbour<G, Point, (f64, Point)> for Stream<G, (f64, Point)> {
     fn closest_neighbour(&self, sampled: &Stream<G, Point>)
-                         -> Stream<G, (f64, Point)> {
+        -> Stream<G, (f64, Point)>
+    {
         self.binary_frontier(
             sampled,
             Pipeline,
