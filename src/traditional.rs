@@ -26,6 +26,77 @@ use timely::dataflow::{
     Scope
 };
 use timely::dataflow::scopes::child::Child;
+use timely::progress::timestamp::Refines;
+use timely::progress::Timestamp;
+use timely::communication::Data as CommData;
+use timely::progress::timestamp::PathSummary;
+
+// allow the use of iteration that then re-accumulates to the
+// base timestamp
+#[derive(PartialEq, PartialOrd, Clone, Hash, Ord, Default, Debug, Eq, Abomonation)]
+struct LoopStamp(u64, u64);
+impl PartialOrder for LoopStamp {
+    fn less_than(&self, other: &Self) -> bool {
+        if self.0 < other.0 {
+            true
+        } else if self.0 == other.0 && self.1 < other.1 {
+            true
+        } else {
+            false
+        }
+    }
+    fn less_equal(&self, other: &Self) -> bool {
+        if self.0 < other.0 {
+            true
+        } else if self.0 == other.0 && self.1 <= other.1 {
+            true
+        } else {
+            false
+        }
+    }
+}
+impl PathSummary<LoopStamp> for LoopStamp {
+    fn results_in(&self, other: &LoopStamp) -> Option<LoopStamp> {
+        let mut result = LoopStamp(0, 0);
+        let r0 = self.0.overflowing_add(other.0);
+        let r1 = self.1.overflowing_add(other.1);
+        if r0.1 || r1.1 {
+            return None;
+        } else {
+            result.0 = r0.0;
+            result.1 = r1.0
+        }
+        Some(result)
+    }
+    fn followed_by(&self, other: &Self) -> Option<Self> {
+        self.results_in(other)
+    }
+}
+// impl CommData for LoopStamp {}
+impl Timestamp for LoopStamp {
+    type Summary = LoopStamp;
+}
+impl Refines<u64> for LoopStamp {
+    fn to_inner(other: u64) -> LoopStamp {
+        LoopStamp(other, 0)
+    }
+    fn to_outer(self) -> u64 {
+        if self.1 > 0 {
+            self.0 + 1
+        } else {
+            self.0
+        }
+    }
+
+    fn summarize(path: <LoopStamp as Timestamp>::Summary)
+        -> <u64 as Timestamp>::Summary {
+        if path.1 > 0 {
+            path.0 + 1
+        } else {
+            path.0
+        }
+    }
+}
 
 use crate::euclidean_distance::EuclideanDistance;
 
@@ -49,15 +120,15 @@ impl<G: Scope<Timestamp=u64>> KMeansPPInitialise<G, (f64, Point), Vec<Point>> fo
         let (mut cats, raw_data) = self.select_random(wid);
 
         // select 'k - 1' more initial data points
-        let (data, cats) = self.scope().scoped::<u64, _, _>(
+        let (data, cats) = self.scope().scoped::<LoopStamp, _, _>(
             "Select k scope",
             move |iter_scope| {
 
                 // set up the iteration
                 let (cat_iter_handle, cat_iter_stream) =
-                    (*iter_scope).feedback(1);
+                    (*iter_scope).feedback(LoopStamp(0, 1));
                 let (data_iter_handle, data_iter_stream) =
-                    (*iter_scope).feedback(1);
+                    (*iter_scope).feedback(LoopStamp(0, 1));
 
                 // enter the subscope so iterations don't get mixed in together
                 let cats = cats.enter(iter_scope);
@@ -75,10 +146,16 @@ impl<G: Scope<Timestamp=u64>> KMeansPPInitialise<G, (f64, Point), Vec<Point>> fo
                     .select_weighted_initial(&sums);
                 let (new_cat, addition) = new_cat
                     .map(|v| v.1)
-                    .branch_when(move |time| *time >= (k - 1) as u64);
-                new_cat.connect_loop(cat_iter_handle);
+                    .duplicate();
+                new_cat
+                    .branch_when(move |time|
+                        *time >= LoopStamp(time.0, (k - 1) as u64)
+                    ).0
+                    .connect_loop(cat_iter_handle);
                 let (reiter, passed) = passed
-                    .branch_when(move |time| *time >= (k - 1) as u64);
+                    .branch_when(move |time|
+                        *time >= LoopStamp(time.0, (k - 1) as u64)
+                    );
                 reiter.connect_loop(data_iter_handle);
 
                 // return the chosen categories and passed-on data

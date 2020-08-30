@@ -40,7 +40,7 @@ fn main() {
         worker.dataflow(|scope| {
             let (data, cats) = scope
                 .input_from(&mut input)
-                .kmeans_pp_initialise(2, index);
+                .kmeans_pp_initialise(3, index);
             cats.inspect_batch(|t, data| {
                 data.iter().for_each(|v| println!("time {:?} cats: {:?}", t, v))
             });
