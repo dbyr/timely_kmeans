@@ -7,19 +7,7 @@ use std::borrow::ToOwned;
 use timely::dataflow::operators::generic::builder_rc::OperatorBuilder;
 use timely::progress::frontier::AntichainRef;
 use rand::{Rng, thread_rng};
-use timely::dataflow::operators::{
-    Operator,
-    Exchange,
-    Broadcast,
-    Map,
-    Concat,
-    Accumulate,
-    Feedback,
-    Enter,
-    ConnectLoop,
-    BranchWhen,
-    Leave
-};
+use timely::dataflow::operators::{Operator, Exchange, Broadcast, Map, Concat, Accumulate, Feedback, Enter, ConnectLoop, BranchWhen, Leave};
 use timely::dataflow::{
     Stream,
     Scope
@@ -78,20 +66,12 @@ impl Refines<u64> for LoopStamp {
         LoopStamp(other, 0)
     }
     fn to_outer(self) -> u64 {
-        if self.1 > 0 {
-            self.0 + 1
-        } else {
-            self.0
-        }
+        self.0
     }
 
     fn summarize(path: <LoopStamp as Timestamp>::Summary)
         -> <u64 as Timestamp>::Summary {
-        if path.1 > 0 {
-            path.0 + 1
-        } else {
-            path.0
-        }
+        path.0
     }
 }
 
@@ -128,7 +108,8 @@ impl<G: Scope<Timestamp=u64>> KMeansPPInitialise<G, (f64, Point), Vec<Point>> fo
                     (*iter_scope).feedback(LoopStamp(0, 1));
 
                 // enter the subscope so iterations don't get mixed in together
-                let cats = cats.enter(iter_scope);
+                let cats = cats
+                    .enter(iter_scope).duplicate();
                 let mut raw_data = raw_data
                     .map(|v| (f64::MAX, v))
                     .enter(iter_scope);
@@ -136,7 +117,7 @@ impl<G: Scope<Timestamp=u64>> KMeansPPInitialise<G, (f64, Point), Vec<Point>> fo
                 // run the iteration
                 raw_data = raw_data
                     .concat(&data_iter_stream)
-                    .closest_neighbour(&cats.concat(&cat_iter_stream));
+                    .closest_neighbour(&cats.0.concat(&cat_iter_stream));
                 let (sums, raw_data) = raw_data
                     .sum_local_squared_distances();
                 let (new_cat, passed) = raw_data
@@ -146,17 +127,17 @@ impl<G: Scope<Timestamp=u64>> KMeansPPInitialise<G, (f64, Point), Vec<Point>> fo
                     .duplicate();
                 new_cat
                     .branch_when(move |time|
-                        *time >= LoopStamp(time.0, (k - 1) as u64)
+                        k > 1 && *time >= LoopStamp(time.0, (k - 2) as u64)
                     ).0
                     .connect_loop(cat_iter_handle);
                 let (reiter, passed) = passed
                     .branch_when(move |time|
-                        *time >= LoopStamp(time.0, (k - 1) as u64)
+                        k > 1 && *time >= LoopStamp(time.0, (k - 2) as u64)
                     );
                 reiter.connect_loop(data_iter_handle);
 
                 // return the chosen categories and passed-on data
-                (passed.leave(), addition.leave())
+                (passed.leave(), addition.concat(&cats.1).leave())
             });
         (data, cats.create_categories())
     }

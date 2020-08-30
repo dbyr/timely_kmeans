@@ -10,16 +10,16 @@ mod traditional;
 mod sampler;
 
 use point::Point;
-use traditional::{SelectRandom, ClosestNeighbour, SumDistances, UpdateCategories};
+// use traditional::{SelectRandom, ClosestNeighbour, SumDistances, UpdateCategories};
 // use sampler::SampleData;
 use timely::dataflow::operators::{Input, Inspect,
-                                  Probe, Map, Accumulate, Concat
+                                  // Probe, Map, Accumulate, Concat
 };
 // use timely::dataflow::operators::capture::replay::Replay;
 use timely::dataflow::{InputHandle, ProbeHandle};
 use std::f64;
 use crate::traditional::{
-    SelectSamples, SelectWeightedInitial, DuplicateStream, CreateCategories,
+    // SelectSamples, SelectWeightedInitial, DuplicateStream, CreateCategories,
                          KMeansPPInitialise};
 // use crate::euclidean_distance::EuclideanDistance;
 
@@ -37,14 +37,14 @@ fn main() {
         let mut input = InputHandle::new();
         // let mut initial_probe = ProbeHandle::new();
         // let mut distance_probe = ProbeHandle::new();
-        let mut sum_probe = ProbeHandle::new();
+        let sum_probe = ProbeHandle::new();
         let index = worker.index();
 
         // select the initial random point
         worker.dataflow(|scope| {
             let (data, cats) = scope
                 .input_from(&mut input)
-                .kmeans_pp_initialise(3, index);
+                .kmeans_pp_initialise(4, index);
             cats.inspect_batch(|t, data| {
                 data.iter().for_each(|v| println!("time {:?} cats: {:?}", t, v))
             });
