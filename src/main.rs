@@ -16,7 +16,7 @@ use timely::dataflow::operators::{Input, Inspect, Probe, Map, Accumulate, Concat
 use timely::dataflow::operators::capture::replay::Replay;
 use timely::dataflow::{InputHandle, ProbeHandle};
 use std::f64;
-use crate::traditional::{SelectSamples, SelectWeightedInitial, DuplicateStream, CreateCategories};
+use crate::traditional::{SelectSamples, SelectWeightedInitial, DuplicateStream, CreateCategories, KMeansPPInitialise};
 use crate::euclidean_distance::EuclideanDistance;
 
 /*
@@ -38,61 +38,71 @@ fn main() {
 
         // select the initial random point
         worker.dataflow(|scope| {
-            let (mut sampled, mut data) =
-                scope.input_from(&mut input).select_random(index.clone());
-            sampled = sampled
-                .inspect_batch(move |t, x|
-                    x.iter().for_each(move |v| println!("worker {} sampled: {:?} w/ t={:?}", index.clone(), v, t))
-                );
-            data = data
-                .inspect_batch(move |t, x|
-                    x.iter().for_each(move |v| println!("worker {} passed on: {:?} w/ t={:?}", index.clone(), v, t))
-                );
+            let (data, cats) = scope
+                .input_from(&mut input)
+                .kmeans_pp_initialise(2, index);
+            cats.inspect_batch(|t, data| {
+                data.iter().for_each(|v| println!("time {:?} cats: {:?}", t, v))
+            });
+            data.inspect_batch(|t, data| {
+                data.iter().for_each(|v| println!("time {:?} data: {:?}", t, v))
+            });
 
-                // .probe_with(&mut initial_probe);
-            // data
+            // let (mut sampled, mut data) =
+            //     scope.input_from(&mut input).select_random(index.clone());
+            // sampled = sampled
             //     .inspect_batch(move |t, x|
-            //         x.iter().for_each(move |v| println!("worker {} data: {:?} w/ t={:?}", index.clone(), v, t))
+            //         x.iter().for_each(move |v| println!("worker {} sampled: {:?} w/ t={:?}", index.clone(), v, t))
             //     );
-
-            // calculate the distance for the randomly selected point
-            let (sampled, categories) = sampled.duplicate();
-            let initial_distanced = data
-                .map(|p| (f64::MAX, p))
-                .closest_neighbour(&sampled)
-                .inspect_batch(move |t, v|
-                    v.iter().for_each(|x|println!("{:?} is {} away at time {:?}", x.1, x.0, t))
-                );
-
-            let (summed, piped) = initial_distanced.sum_square_distances();
-            summed
-                .inspect_batch(move |t, v|
-                    v.iter().for_each(|x| println!("sum to {} at {:?}", x, t))
-                )
-                .probe_with(&mut sum_probe);
-
-            let (mut sampled, mut data) =
-                piped.select_weighted_initial(&summed);
-            sampled = sampled
-                .inspect_batch(move |t, v|
-                v.iter().for_each(|x|println!("weighted sample {:?} at {:?}", x.1, t))
-            );
-                // piped.sample_data(&summed.map(|v| (v, 3usize)));
-
-            let cats = sampled.map(|v| v.1)
-                .concat(&categories)
-                .inspect_batch(move |t, v|
-                v.iter().for_each(|x|println!("sampled {:?} at time {:?}", x, t))
-            ).create_categories();
-            data = data.inspect_batch(move |t, v|
-                v.iter().for_each(|x|println!("passed {:?} at time {:?}", x.1, t))
-            );
-
-            let (reuse, mut new_cats) = data
-                .update_categories(&cats);
-            new_cats = new_cats.inspect_batch(move |t, v|
-                v.iter().for_each(|x|println!("cat {:?} at time {:?}", x, t))
-            );
+            // data = data
+            //     .inspect_batch(move |t, x|
+            //         x.iter().for_each(move |v| println!("worker {} passed on: {:?} w/ t={:?}", index.clone(), v, t))
+            //     );
+            //
+            //     // .probe_with(&mut initial_probe);
+            // // data
+            // //     .inspect_batch(move |t, x|
+            // //         x.iter().for_each(move |v| println!("worker {} data: {:?} w/ t={:?}", index.clone(), v, t))
+            // //     );
+            //
+            // // calculate the distance for the randomly selected point
+            // let (sampled, categories) = sampled.duplicate();
+            // let initial_distanced = data
+            //     .map(|p| (f64::MAX, p))
+            //     .closest_neighbour(&sampled)
+            //     .inspect_batch(move |t, v|
+            //         v.iter().for_each(|x|println!("{:?} is {} away at time {:?}", x.1, x.0, t))
+            //     );
+            //
+            // let (summed, piped) = initial_distanced.sum_square_distances();
+            // summed
+            //     .inspect_batch(move |t, v|
+            //         v.iter().for_each(|x| println!("sum to {} at {:?}", x, t))
+            //     )
+            //     .probe_with(&mut sum_probe);
+            //
+            // let (mut sampled, mut data) =
+            //     piped.select_weighted_initial(&summed);
+            // sampled = sampled
+            //     .inspect_batch(move |t, v|
+            //     v.iter().for_each(|x|println!("weighted sample {:?} at {:?}", x.1, t))
+            // );
+            //     // piped.sample_data(&summed.map(|v| (v, 3usize)));
+            //
+            // let cats = sampled.map(|v| v.1)
+            //     .concat(&categories)
+            //     .inspect_batch(move |t, v|
+            //     v.iter().for_each(|x|println!("sampled {:?} at time {:?}", x, t))
+            // ).create_categories();
+            // data = data.inspect_batch(move |t, v|
+            //     v.iter().for_each(|x|println!("passed {:?} at time {:?}", x.1, t))
+            // );
+            //
+            // let (reuse, mut new_cats) = data
+            //     .update_categories(&cats);
+            // new_cats = new_cats.inspect_batch(move |t, v|
+            //     v.iter().for_each(|x|println!("cat {:?} at time {:?}", x, t))
+            // );
         });
 
         for i in 0..1 {

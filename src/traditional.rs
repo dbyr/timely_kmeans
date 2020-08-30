@@ -7,16 +7,30 @@ use std::borrow::ToOwned;
 use timely::dataflow::operators::generic::builder_rc::OperatorBuilder;
 use timely::progress::frontier::AntichainRef;
 use rand::{Rng, thread_rng};
-use timely::dataflow::operators::{Operator, Exchange, Broadcast, Map, Concat, Accumulate, Inspect};
+use timely::dataflow::operators::{
+    Operator,
+    Exchange,
+    Broadcast,
+    Map,
+    Concat,
+    Accumulate,
+    Inspect,
+    Feedback,
+    Enter,
+    ConnectLoop,
+    BranchWhen,
+    Leave
+};
 use timely::dataflow::{
     Stream,
     Scope
 };
+use timely::dataflow::scopes::child::Child;
 
 use crate::euclidean_distance::EuclideanDistance;
 
 pub trait KMeansPPInitialise<G: Scope, D1: Data, D2: Data> {
-    fn kmeans_pp_initialise(&self, cats: usize) -> (Stream<G, D1>, Stream<G, D2>);
+    fn kmeans_pp_initialise(&self, k: usize, wid: usize) -> (Stream<G, D1>, Stream<G, D2>);
 }
 
 pub trait ScalableInitialise<G: Scope, D1: Data, D2: Data> {
@@ -27,15 +41,52 @@ pub trait LloydsIteration<G: Scope, D1: Data> {
     fn lloyds_iteration(&self, cats: &Stream<G, D1>) -> Stream<G, D1>;
 }
 
-// impl<G: Scope> KMeansPPInitialise<G, (f64, Point), Vec<Point>> for Stream<G, Point> {
-//     fn kmeans_pp_initialise(&self, cats: usize) -> (Stream<G, (f64, Point)>, Stream<G, Vec<Point>>) {
-//         let (mut cats, raw_data) = self.select_random();
-//         let initial = cats.clone();
-//         let mut data = raw_data
-//             .map(|v| (f64::MAX, v)).closest_neighbour(&cats);
-//         let result = data.select_weighted_initial_local();
-//     }
-// }
+impl<G: Scope<Timestamp=u64>> KMeansPPInitialise<G, (f64, Point), Vec<Point>> for Stream<G, Point> {
+    fn kmeans_pp_initialise(&self, k: usize, wid: usize)
+    -> (Stream<G, (f64, Point)>, Stream<G, Vec<Point>>)
+    {
+        // select first initial data point
+        let (mut cats, raw_data) = self.select_random(wid);
+
+        // select 'k - 1' more initial data points
+        let (data, cats) = self.scope().scoped::<u64, _, _>(
+            "Select k scope",
+            move |iter_scope| {
+
+                // set up the iteration
+                let (cat_iter_handle, cat_iter_stream) =
+                    (*iter_scope).feedback(1);
+                let (data_iter_handle, data_iter_stream) =
+                    (*iter_scope).feedback(1);
+
+                // enter the subscope so iterations don't get mixed in together
+                let cats = cats.enter(iter_scope);
+                let mut raw_data = raw_data
+                    .map(|v| (f64::MAX, v))
+                    .enter(iter_scope);
+
+                // run the iteration
+                raw_data = raw_data
+                    .concat(&data_iter_stream)
+                    .closest_neighbour(&cats.concat(&cat_iter_stream));
+                let (sums, raw_data) = raw_data
+                    .sum_square_distances();
+                let (new_cat, passed) = raw_data
+                    .select_weighted_initial(&sums);
+                let (new_cat, addition) = new_cat
+                    .map(|v| v.1)
+                    .branch_when(move |time| *time >= (k - 1) as u64);
+                new_cat.connect_loop(cat_iter_handle);
+                let (reiter, passed) = passed
+                    .branch_when(move |time| *time >= (k - 1) as u64);
+                reiter.connect_loop(data_iter_handle);
+
+                // return the chosen categories and passed-on data
+                (passed.leave(), addition.leave())
+            });
+        (data, cats.create_categories())
+    }
+}
 
 pub trait SumDistances<G: Scope, D1: Data, D2: Data> {
     fn sum_square_distances(&self) -> (Stream<G, D2>, Stream<G, D1>);
