@@ -12,12 +12,16 @@ mod sampler;
 use point::Point;
 use traditional::{SelectRandom, ClosestNeighbour, SumDistances, UpdateCategories};
 // use sampler::SampleData;
-use timely::dataflow::operators::{Input, Inspect, Probe, Map, Accumulate, Concat};
-use timely::dataflow::operators::capture::replay::Replay;
+use timely::dataflow::operators::{Input, Inspect,
+                                  Probe, Map, Accumulate, Concat
+};
+// use timely::dataflow::operators::capture::replay::Replay;
 use timely::dataflow::{InputHandle, ProbeHandle};
 use std::f64;
-use crate::traditional::{SelectSamples, SelectWeightedInitial, DuplicateStream, CreateCategories, KMeansPPInitialise};
-use crate::euclidean_distance::EuclideanDistance;
+use crate::traditional::{
+    SelectSamples, SelectWeightedInitial, DuplicateStream, CreateCategories,
+                         KMeansPPInitialise};
+// use crate::euclidean_distance::EuclideanDistance;
 
 /*
 Potential solution:
@@ -49,7 +53,8 @@ fn main() {
             });
 
             // let (mut sampled, mut data) =
-            //     scope.input_from(&mut input).select_random(index.clone());
+            //     scope.input_from(&mut input)
+            //         .select_random(index.clone());
             // sampled = sampled
             //     .inspect_batch(move |t, x|
             //         x.iter().for_each(move |v| println!("worker {} sampled: {:?} w/ t={:?}", index.clone(), v, t))
@@ -70,23 +75,32 @@ fn main() {
             // let initial_distanced = data
             //     .map(|p| (f64::MAX, p))
             //     .closest_neighbour(&sampled)
-            //     .inspect_batch(move |t, v|
-            //         v.iter().for_each(|x|println!("{:?} is {} away at time {:?}", x.1, x.0, t))
-            //     );
+                // .inspect_batch(move |t, v|
+                //     v.iter().for_each(|x|println!("{:?} is {} away at time {:?}", x.1, x.0, t))
+                // )
+            ;
             //
-            // let (summed, piped) = initial_distanced.sum_square_distances();
-            // summed
+            // let (summed, piped) =
+            //     initial_distanced.sum_square_distances();
+            // piped
             //     .inspect_batch(move |t, v|
-            //         v.iter().for_each(|x| println!("sum to {} at {:?}", x, t))
+            //         v.iter().for_each(|x| println!("sum to {:?} at {:?}", x, t))
             //     )
-            //     .probe_with(&mut sum_probe);
+                // .probe_with(&mut sum_probe)
+            ;
             //
             // let (mut sampled, mut data) =
             //     piped.select_weighted_initial(&summed);
             // sampled = sampled
             //     .inspect_batch(move |t, v|
             //     v.iter().for_each(|x|println!("weighted sample {:?} at {:?}", x.1, t))
-            // );
+            // )
+            // ;
+            // data = data
+            //     .inspect_batch(move |t, v|
+            //         v.iter().for_each(|x|println!("passed on {:?} at {:?}", x.1, t))
+            //     )
+            // ;
             //     // piped.sample_data(&summed.map(|v| (v, 3usize)));
             //
             // let cats = sampled.map(|v| v.1)
