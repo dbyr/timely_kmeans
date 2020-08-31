@@ -12,15 +12,11 @@ mod sampler;
 use point::Point;
 // use traditional::{SelectRandom, ClosestNeighbour, SumDistances, UpdateCategories};
 // use sampler::SampleData;
-use timely::dataflow::operators::{Input, Inspect,
-                                  // Probe, Map, Accumulate, Concat
-};
+use timely::dataflow::operators::{Input, Inspect};
 // use timely::dataflow::operators::capture::replay::Replay;
 use timely::dataflow::{InputHandle, ProbeHandle};
 use std::f64;
-use crate::traditional::{
-    // SelectSamples, SelectWeightedInitial, DuplicateStream, CreateCategories,
-                         KMeansPPInitialise};
+use crate::traditional::{KMeansPPInitialise, LloydsIteration};
 // use crate::euclidean_distance::EuclideanDistance;
 
 /*
@@ -44,13 +40,17 @@ fn main() {
         worker.dataflow(|scope| {
             let (data, cats) = scope
                 .input_from(&mut input)
-                .kmeans_pp_initialise(4, index);
+                .kmeans_pp_initialise(2, index);
             cats.inspect_batch(|t, data| {
                 data.iter().for_each(|v| println!("time {:?} cats: {:?}", t, v))
             });
             data.inspect_batch(|t, data| {
                 data.iter().for_each(|v| println!("time {:?} data: {:?}", t, v))
             });
+            let _final_cats = data.lloyds_iteration(&cats, 100)
+                .inspect_batch(|t, data| {
+                    data.iter().for_each(|v| println!("time {:?} final cats: {:?}", t, v))
+                });
 
             // let (mut sampled, mut data) =
             //     scope.input_from(&mut input)
@@ -122,11 +122,14 @@ fn main() {
         for i in 0..1 {
         //     let i = 0;
             println!("worker {} sending round {}", index, i);
-            for j in 0..10 {
-                input.send(
-                    Point::new((i + j) as f64+5.0, index as f64)
-                );
+            if index == 0 {
+                for j in 0..10 {
+                    input.send(
+                        Point::new((i + j) as f64+5.0, index as f64)
+                    );
+                }
             }
+
             input.advance_to(input.epoch() + 1);
             // while initial_probe.less_than(input.time()) {
             //     std::thread::sleep(std::time::Duration::from_millis(500));

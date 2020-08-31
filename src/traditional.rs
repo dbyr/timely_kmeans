@@ -7,7 +7,7 @@ use std::borrow::ToOwned;
 use timely::dataflow::operators::generic::builder_rc::OperatorBuilder;
 use timely::progress::frontier::AntichainRef;
 use rand::{Rng, thread_rng};
-use timely::dataflow::operators::{Operator, Exchange, Broadcast, Map, Concat, Accumulate, Feedback, Enter, ConnectLoop, BranchWhen, Leave};
+use timely::dataflow::operators::{Operator, Exchange, Broadcast, Map, Concat, Accumulate, Feedback, Enter, ConnectLoop, BranchWhen, Leave, Branch};
 use timely::dataflow::{
     Stream,
     Scope
@@ -86,7 +86,52 @@ pub trait ScalableInitialise<G: Scope, D1: Data, D2: Data> {
 }
 
 pub trait LloydsIteration<G: Scope, D1: Data> {
-    fn lloyds_iteration(&self, cats: &Stream<G, D1>) -> Stream<G, D1>;
+    fn lloyds_iteration(&self, cats: &Stream<G, D1>, limit: u64) -> Stream<G, D1>;
+}
+
+impl<G: Scope<Timestamp=u64>> LloydsIteration<G, Vec<Point>>
+for Stream<G, (f64, Point)> {
+    fn lloyds_iteration(&self, cats: &Stream<G, Vec<Point>>, limit: u64)
+        -> Stream<G, Vec<Point>>
+    {
+        self.scope().scoped::<LoopStamp, _, _>(
+            "Lloyds iteration scope",
+            move |iter_scope| {
+                let (data_iter_handle, data_iter_stream) =
+                    (*iter_scope).feedback(LoopStamp(0, 1));
+                let (cat_iter_handle, cat_iter_stream) =
+                    (*iter_scope).feedback(LoopStamp(0, 1));
+
+                // enter the scope to begin the iteration
+                let data = self
+                    .enter(iter_scope).concat(&data_iter_stream);
+                let cats = cats
+                    .enter(iter_scope).concat(&cat_iter_stream);
+
+                // iterate until either 100 iterations or convergence
+                let (data, new_cats) =
+                    data.update_categories(&cats);
+                let data = data
+                    .branch(move |t, d| d.0.is_nan() || t.1 >= limit);
+                let new_cats = new_cats
+                    .branch(move |t, d|
+                        d.iter().all(|v| !v.0) || t.1 >= limit
+                    );
+                new_cats.0
+                    .map(|v| v.into_iter().map(|v| v.1).collect())
+                    .connect_loop(cat_iter_handle);
+                data.0
+                    .connect_loop(data_iter_handle);
+
+                // return the final categories
+                new_cats.1
+                    .map(|v|
+                        v.into_iter().map(|v| v.1).collect()
+                    )
+                    .leave()
+            }
+        )
+    }
 }
 
 impl<G: Scope<Timestamp=u64>> KMeansPPInitialise<G, (f64, Point), Vec<Point>> for Stream<G, Point> {
