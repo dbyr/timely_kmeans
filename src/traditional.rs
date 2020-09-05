@@ -82,12 +82,29 @@ pub trait KMeansPPInitialise<G: Scope, D1: Data, D2: Data> {
 }
 
 pub trait ScalableInitialise<G: Scope, D1: Data, D2: Data> {
-    fn scalable_initialise(&self, cats: usize) -> (Stream<G, D1>, Stream<G, D2>);
+    fn scalable_initialise(&self, k: usize, wid: usize) -> (Stream<G, D1>, Stream<G, D2>);
 }
 
 pub trait LloydsIteration<G: Scope, D1: Data> {
     fn lloyds_iteration(&self, cats: &Stream<G, D1>, limit: u64) -> Stream<G, D1>;
 }
+
+// impl<G: Scope<Timestamp=u64>> ScalableInitialise<G, (f64, Point), Vec<Point>>
+// for Stream<G, (f64, Point)> {
+//     fn scalable_initialise(&self, k: usize, wid: usize)
+//         -> (Stream<G, (f64, Point)>, Stream<G, Vec<Point>>)
+//     {
+//         // select first initial data point
+//         let (cats, raw_data) = self.select_random(wid);
+//
+//         self.scope().scoped(
+//             "Oversampling scope",
+//             |iter_scope| {
+//
+//             }
+//         )
+//     }
+// }
 
 impl<G: Scope<Timestamp=u64>> LloydsIteration<G, Vec<Point>>
 for Stream<G, (f64, Point)> {
