@@ -20,6 +20,36 @@ pub trait Savable {
     fn load_from_file(file: File) -> Self;
 }
 
+#[derive(Abomonation, Clone)]
+pub enum StreamSplitter<D1, D2> {
+    LeftStream(D1),
+    RightStream(D2)
+}
+
+impl<D1, D2> StreamSplitter<D1, D2> {
+    pub fn left(self) -> D1 {
+        match self {
+            StreamSplitter::LeftStream(v) => v,
+            StreamSplitter::RightStream(_) => panic!("Attempted to get left value from right value")
+        }
+    }
+    pub fn right(self) -> D2 {
+        match self {
+            StreamSplitter::LeftStream(_) => panic!("Attempted to get right value from left value"),
+            StreamSplitter::RightStream(v) => v
+        }
+    }
+}
+
+impl<D> StreamSplitter<D, D> {
+    pub fn unwrap(self) -> D {
+        match self {
+            StreamSplitter::LeftStream(v) => v,
+            StreamSplitter::RightStream(v) => v
+        }
+    }
+}
+
 #[derive(PartialEq, Debug)]
 pub enum TrainingError {
     InvalidData,
