@@ -46,8 +46,8 @@ fn kmeans_scalable(data_path: String, cats: usize) -> Option<Vec<Point>> {
             // select the initial random point
             // let cats =
             worker.dataflow(|scope| {
-                let (data, cats) = scope
-                    .input_from(&mut input)
+                let data = scope.input_from(&mut input);
+                let cats = data
                     .scalable_initialise(cats, index);
                 data.lloyds_iteration(&cats, 100)
                     .inspect_batch(move |_t, data| {
@@ -109,18 +109,13 @@ fn kmeans_pp(data_path: String, cats: usize) -> Option<Vec<Point>> {
 
 
         // select the initial random point
-        // let cats =
         worker.dataflow(|scope| {
-            let (data, cats) = scope
-                .input_from(&mut input)
+            let data = scope.input_from(&mut input);
+            let cats = data
                 .kmeans_pp_initialise(cats, index);
-            // cats.inspect_batch(|t, data| {
-            //     data.iter().for_each(|v| println!("time {:?} initial cats: {:?}", t, v))
-            // });
             data.lloyds_iteration(&cats, 100)
                 .inspect_batch(move |_t, data| {
                     for v in data {
-                        // println!("time {:?} final cats: {:?}", t, v);
                         for item in v {
                             match sender.send(*item) {
                                 // get the compiler off my back
@@ -233,8 +228,8 @@ fn main() {
     // run kmeans
     let data = "../rust_classifiers/data/mpi/1procs/easy_clusters".to_string();
     // let data = "../rust_classifiers/data/mpi/2procs/easy_clusters".to_string();
-    let cats = match kmeans_pp(data, 15) {
-    // let cats = match kmeans_scalable(data, 15) {
+    // let cats = match kmeans_pp(data, 15) {
+    let cats = match kmeans_scalable(data, 15) {
         Some(v) => v,
         None => {
             println!("Kmeans failed");

@@ -2,13 +2,12 @@ use crate::point::Point;
 use crate::common::StreamSplitter::{RightStream, LeftStream};
 use std::f64;
 use timely::dataflow::channels::pact::Pipeline;
-use timely::{Data, PartialOrder, ExchangeData};
+use timely::{Data, ExchangeData};
 use std::collections::HashMap;
 use std::borrow::ToOwned;
 use timely::dataflow::operators::generic::builder_rc::OperatorBuilder;
-use timely::progress::frontier::AntichainRef;
 use rand::{Rng, thread_rng};
-use timely::dataflow::operators::{Operator, Exchange, Broadcast, Map, Concat, Accumulate, Feedback, Enter, ConnectLoop, BranchWhen, Leave, Branch, Inspect};
+use timely::dataflow::operators::{Operator, Exchange, Broadcast, Map, Concat, Accumulate, Feedback, Enter, ConnectLoop, BranchWhen, Leave, Branch};
 use timely::dataflow::{
     Stream,
     Scope
@@ -17,33 +16,30 @@ use timely::order::Product;
 
 use crate::euclidean_distance::EuclideanDistance;
 
-pub trait KMeansPPInitialise<G: Scope, D1: Data, D2: Data> {
-    fn kmeans_pp_initialise(&self, k: usize, wid: usize) -> (Stream<G, D1>, Stream<G, D2>);
+pub trait KMeansPPInitialise<G: Scope, D: Data> {
+    fn kmeans_pp_initialise(&self, k: usize, wid: usize) -> Stream<G, D>;
 }
 
-pub trait ScalableInitialise<G: Scope, D1: Data, D2: Data> {
-    fn scalable_initialise(&self, k: usize, wid: usize) -> (Stream<G, D1>, Stream<G, D2>);
+pub trait ScalableInitialise<G: Scope, D: Data> {
+    fn scalable_initialise(&self, k: usize, wid: usize) -> Stream<G, D>;
 }
 
-pub trait LloydsIteration<G: Scope, D1: Data> {
-    fn lloyds_iteration(&self, cats: &Stream<G, D1>, limit: u64) -> Stream<G, D1>;
+pub trait LloydsIteration<G: Scope, D: Data> {
+    fn lloyds_iteration(&self, cats: &Stream<G, D>, limit: u64) -> Stream<G, D>;
 }
 
-impl<G: Scope<Timestamp=u64>> ScalableInitialise<G, (f64, Point), Vec<Point>>
+impl<G: Scope<Timestamp=u64>> ScalableInitialise<G, Vec<Point>>
 for Stream<G, Point> {
     fn scalable_initialise(&self, k: usize, wid: usize)
-        -> (Stream<G, (f64, Point)>, Stream<G, Vec<Point>>)
+        -> Stream<G, Vec<Point>>
     {
         // select first initial data point
         let (cats, raw_data) = self.select_random(wid);
-        let (cats, initial) = cats.duplicate();
-        let raw_data = raw_data.map(|v| (f64::MAX, v));
+        let raw_data = raw_data.map(|v| (f64::MAX, v))
+            .closest_neighbour(&cats);
         let initial_sum = raw_data
-            .closest_neighbour(&initial)
-            .sum_square_distances();
-        let initial_sum = initial_sum
+            .sum_square_distances()
             .map(|v| v.log10() as u64);
-        let raw_data = raw_data.map(|(_, v)| v);
 
         let initial_cats = self.scope().iterative::<u64, _, _>(
             move |iter_scope| {
@@ -59,59 +55,50 @@ for Stream<G, Point> {
                 let cats = cats
                     .enter(iter_scope)
                     .concat(&cat_iter_stream);
-                let mut raw_data = raw_data
-                    .map(|v| (f64::MAX, v))
+                let raw_data = raw_data
                     .enter(iter_scope)
                     .concat(&data_iter_stream);
                 let cond = initial_sum
                     .enter(iter_scope)
                     .concat(&cond_iter_stream);
-                    // .inspect_batch(|t, _| println!("Condition at time {}", t.inner));
 
                 // run the iteration
-                raw_data = raw_data.closest_neighbour(&cats);
+                let raw_data = raw_data.closest_neighbour(&cats);
                 let sums = raw_data.sum_square_distances();
                 let (sampled, passed) = raw_data
-                    .inspect_batch(|t, _| println!("Seen raw_data at {:?}", t.inner))
-                    .sample_data(&sums
-                        .inspect_batch(|t, _| println!("Seen sums at {:?}", t.inner)).map(move |v| (v, k)));
-                let sampled = sampled
-                    .inspect_batch(|t, s| println!("Sampled is {:?} at time {:?}", s, t.inner))
-                    .map(|v| v.1);
-                sampled
-                    .branch_after(
+                    .sample_data(&sums.map(move |v| (v, k)));
+                let sampled = sampled.map(|v| v.1);
+
+                sampled.branch_after(
                         &cond,
-                            // .inspect_batch(|_, s| println!("Sum is {:?}", s)),
                         |time, val| {
-                            time.inner > *val
+                            time.inner >= *val
                         }
                     ).0.connect_loop(cat_iter_handle);
-
-                passed
-                    .branch_after(
+                passed.branch_after(
                         &cond,
                         |time, val| {
-                            time.inner > *val
+                            time.inner >= *val
                         }
                     ).0.connect_loop(data_iter_handle);
                 cond.branch_after(
                     &cond,
                     |time, val| {
-                        time.inner > *val
+                        time.inner >= *val
                     }
                 ).0.connect_loop(cond_iter_handle);
 
                 // use the samples to create the cateogires, then
                 // return the chosen categories and passed-on data
-                sampled.leave().kmeans_pp_initialise(k, wid).1
+                sampled.leave().kmeans_pp_initialise(k, wid)
             }
         );
-        (self.map(|v| (f64::MAX, v)), initial_cats)
+        initial_cats
     }
 }
 
 impl<G: Scope<Timestamp=u64>> LloydsIteration<G, Vec<Point>>
-for Stream<G, (f64, Point)> {
+for Stream<G, Point> {
     fn lloyds_iteration(&self, cats: &Stream<G, Vec<Point>>, limit: u64)
         -> Stream<G, Vec<Point>>
     {
@@ -124,6 +111,7 @@ for Stream<G, (f64, Point)> {
 
                 // enter the scope to begin the iteration
                 let data = self
+                    .map(|v| (f64::MAX, v))
                     .enter(iter_scope).concat(&data_iter_stream);
                 let cats = cats
                     .enter(iter_scope).concat(&cat_iter_stream);
@@ -154,9 +142,9 @@ for Stream<G, (f64, Point)> {
     }
 }
 
-impl<G: Scope<Timestamp=u64>> KMeansPPInitialise<G, (f64, Point), Vec<Point>> for Stream<G, Point> {
+impl<G: Scope<Timestamp=u64>> KMeansPPInitialise<G, Vec<Point>> for Stream<G, Point> {
     fn kmeans_pp_initialise(&self, k: usize, wid: usize)
-    -> (Stream<G, (f64, Point)>, Stream<G, Vec<Point>>)
+    -> Stream<G, Vec<Point>>
     {
         // select first initial data point
         let (cats, raw_data) = self.select_random(wid);
@@ -173,41 +161,42 @@ impl<G: Scope<Timestamp=u64>> KMeansPPInitialise<G, (f64, Point), Vec<Point>> fo
 
                 // enter the subscope so iterations don't get mixed in together
                 let cats = cats
-                    .enter(iter_scope);
-                let mut raw_data = raw_data
+                    .enter(iter_scope)
+                    .concat(&cat_iter_stream);
+                let raw_data = raw_data
                     .map(|v| (f64::MAX, v))
-                    .enter(iter_scope);
+                    .enter(iter_scope)
+                    .concat(&data_iter_stream);
 
                 // run the iteration
-                raw_data = raw_data
-                    .concat(&data_iter_stream)
-                    .closest_neighbour(&cats.concat(&cat_iter_stream));
+                let raw_data = raw_data
+                    .closest_neighbour(&cats);
                 let sums = raw_data
                     .sum_local_squared_distances();
                 let (new_cat, passed) = raw_data
                     .select_weighted_initial(&sums);
                 let new_cat = new_cat
                     .map(|v| v.1);
-                new_cat
+                let new_cat = new_cat
                     .branch_when(move |time|
                         k > 1 && time.inner >= (k - 2) as u64
-                    ).0
-                    .connect_loop(cat_iter_handle);
+                    );
+                new_cat.0.connect_loop(cat_iter_handle);
                 passed.connect_loop(data_iter_handle);
 
-                // return the chosen categories and passed-on data
-                new_cat.concat(&cats).leave()
+                // return the chosen categories
+                cats.concat(&new_cat.1).leave()
             });
-        (self.map(|v| (f64::MAX, v)), cats.create_categories())
+        cats.create_categories()
     }
 }
 
-pub trait SumDistances<G: Scope, D1: Data, D2: Data> {
-    fn sum_square_distances(&self) -> Stream<G, D2>;
+pub trait SumDistances<G: Scope, D: Data> {
+    fn sum_square_distances(&self) -> Stream<G, D>;
 }
 
-trait SumLocalDistances<G: Scope, D1: Data, D2: Data> {
-    fn sum_local_squared_distances(&self) -> Stream<G, D2>;
+trait SumLocalDistances<G: Scope, D: Data> {
+    fn sum_local_squared_distances(&self) -> Stream<G, D>;
 }
 
 trait SumStream<G: Scope, D1: Data> {
@@ -281,14 +270,14 @@ for Stream<G, D1> {
                         *cond.as_mut().unwrap() += v.iter().sum::<u64>();
                     }
                     while let Some((cap, v)) = data_input.next() {
-                        let data = to_send.entry(cap.time().clone()).or_insert(vec!());
-                        data.append(&mut v.clone());
+                        let data = to_send.entry(cap.time().clone()).or_insert_with(Vec::new);
+                        data.append(&mut v.replace(Vec::new()));
                     }
                     for (time, val) in stash.iter_mut() {
                         if !data_input.frontier().less_equal(time.time())
                             && !cond_input.frontier().less_equal(time.time()) {
                             let mut sesh = output.session(time);
-                            for datum in to_send.remove(time.time()).unwrap_or(vec!()) {
+                            for datum in to_send.remove(time.time()).unwrap_or_else(Vec::new) {
                                 if logic(time.time(), &val.unwrap_or(0u64)) {
                                     sesh.give(RightStream(datum));
                                 } else {
@@ -303,15 +292,8 @@ for Stream<G, D1> {
             }
         );
         let (out0, out1) =
-            sorted_stream.branch(|_, d|
-                match d {
-                    RightStream(_) => true,
-                    LeftStream(_) => false
-                }
-            );
-        let out0 = out0.map(|v| v.left());
-        let out1 = out1.map(|v| v.right());
-        (out0, out1)
+            sorted_stream.branch(|_, d| d.path());
+        (out0.map(|v| v.left()), out1.map(|v| v.right()))
     }
 }
 
@@ -620,8 +602,7 @@ impl<G: Scope> SelectSamplesLocal<G, (f64, Point), (f64, usize)> for Stream<G, (
                         let incoming_data = to_sample
                             .entry(cap.time().clone())
                             .or_insert_with(Vec::new);
-                        let rep = Vec::new();
-                        incoming_data.append(&mut data.replace(rep));
+                        incoming_data.append(&mut data.replace(Vec::new()));
                     }
                     for (time, weight) in rates.iter_mut() {
                         if !data_input.frontier().less_equal(time.time())
@@ -646,10 +627,7 @@ impl<G: Scope> SelectSamplesLocal<G, (f64, Point), (f64, usize)> for Stream<G, (
             }
         );
         let (samples, data) = splitter_stream
-            .branch(|_, d| match d {
-                LeftStream(_) => false,
-                RightStream(_) => true
-            });
+            .branch(|_, d| d.path());
         (samples.map(|v| v.left()), data.map(|v| v.right()))
     }
 }
@@ -682,7 +660,7 @@ impl<G: Scope> SumStream<G, f64> for Stream<G, f64> {
     }
 }
 
-impl<G: Scope> SumDistances<G, (f64, Point), f64> for Stream<G, (f64, Point)> {
+impl<G: Scope> SumDistances<G, f64> for Stream<G, (f64, Point)> {
     fn sum_square_distances(&self) -> Stream<G, f64> {
         let sum = self.sum_local_squared_distances();
         let glob_sum = sum.exchange(|_| 0).sum().broadcast();
@@ -690,7 +668,7 @@ impl<G: Scope> SumDistances<G, (f64, Point), f64> for Stream<G, (f64, Point)> {
     }
 }
 
-impl<G: Scope> SumLocalDistances<G, (f64, Point), f64> for Stream<G, (f64, Point)> {
+impl<G: Scope> SumLocalDistances<G, f64> for Stream<G, (f64, Point)> {
     fn sum_local_squared_distances(&self) -> Stream<G, f64> {
         self.unary_frontier(
             Pipeline,
@@ -749,7 +727,7 @@ impl<G: Scope> ClosestNeighbour<G, Point, (f64, Point)> for Stream<G, (f64, Poin
 
                     // compare all the other data with the sampled to re-calcaulte their nearest neighbour
                     while let Some((time, data)) = data.next() {
-                        let points = data_stash.entry(time.time().clone()).or_insert(Vec::new());
+                        let points = data_stash.entry(time.time().clone()).or_insert_with(Vec::new);
                         for datum in data.iter() {
                             points.push(*datum);
                         }
@@ -760,19 +738,18 @@ impl<G: Scope> ClosestNeighbour<G, Point, (f64, Point)> for Stream<G, (f64, Poin
                         if !samples.frontier().less_equal(cap.time())
                         && !data.frontier().less_equal(cap.time()) {
                             let mut session = output.session(cap);
-                            let mut sampled = Vec::new();
                             let to_update = data_stash.remove(cap.time()).unwrap_or_else(Vec::new);
-                            std::mem::swap(&mut sampled, stashed);
                             for (old_dist, point) in to_update {
-                                for sampled in sampled.iter() {
+                                let mut best_dist = old_dist;
+                                for sampled in stashed.iter() {
                                     let new_dist = point.distance(sampled);
-                                    if new_dist < old_dist {
-                                        session.give((new_dist, point));
-                                    } else {
-                                        session.give((old_dist, point));
+                                    if new_dist < best_dist {
+                                        best_dist = new_dist;
                                     }
                                 }
+                                session.give((best_dist, point));
                             }
+                            *stashed = Vec::new();
                         }
                     }
                     sample_stash.retain(|_, x| !x.is_empty());
