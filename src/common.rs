@@ -39,6 +39,12 @@ impl<D1, D2> StreamSplitter<D1, D2> {
             StreamSplitter::RightStream(v) => v
         }
     }
+    pub fn path(&self) -> bool {
+        match self {
+            StreamSplitter::LeftStream(_) => false,
+            StreamSplitter::RightStream(_) => true
+        }
+    }
 }
 
 impl<D> StreamSplitter<D, D> {

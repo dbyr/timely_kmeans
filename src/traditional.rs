@@ -37,8 +37,8 @@ for Stream<G, Point> {
         // select first initial data point
         let (cats, raw_data) = self.select_random(wid);
         let (cats, initial) = cats.duplicate();
-        let (initial_sum, raw_data) = raw_data
-            .map(|v| (f64::MAX, v))
+        let raw_data = raw_data.map(|v| (f64::MAX, v));
+        let initial_sum = raw_data
             .closest_neighbour(&initial)
             .sum_square_distances();
         let initial_sum = initial_sum
@@ -65,22 +65,23 @@ for Stream<G, Point> {
                     .concat(&data_iter_stream);
                 let cond = initial_sum
                     .enter(iter_scope)
-                    .concat(&cond_iter_stream)
-                    .inspect_batch(|t, _| println!("Condition at time {}", t.inner));
+                    .concat(&cond_iter_stream);
+                    // .inspect_batch(|t, _| println!("Condition at time {}", t.inner));
 
                 // run the iteration
                 raw_data = raw_data.closest_neighbour(&cats);
-                let (sums, raw_data) = raw_data.sum_square_distances();
+                let sums = raw_data.sum_square_distances();
                 let (sampled, passed) = raw_data
+                    .inspect_batch(|t, _| println!("Seen raw_data at {:?}", t.inner))
                     .sample_data(&sums
-                        .inspect_batch(|_, s| println!("Sums is {:?}", s)).map(move |v| (v, k)));
+                        .inspect_batch(|t, _| println!("Seen sums at {:?}", t.inner)).map(move |v| (v, k)));
                 let sampled = sampled
                     .inspect_batch(|t, s| println!("Sampled is {:?} at time {:?}", s, t.inner))
                     .map(|v| v.1);
                 sampled
                     .branch_after(
-                        &cond
-                            .inspect_batch(|_, s| println!("Sum is {:?}", s)),
+                        &cond,
+                            // .inspect_batch(|_, s| println!("Sum is {:?}", s)),
                         |time, val| {
                             time.inner > *val
                         }
@@ -181,7 +182,7 @@ impl<G: Scope<Timestamp=u64>> KMeansPPInitialise<G, (f64, Point), Vec<Point>> fo
                 raw_data = raw_data
                     .concat(&data_iter_stream)
                     .closest_neighbour(&cats.concat(&cat_iter_stream));
-                let (sums, raw_data) = raw_data
+                let sums = raw_data
                     .sum_local_squared_distances();
                 let (new_cat, passed) = raw_data
                     .select_weighted_initial(&sums);
@@ -202,11 +203,11 @@ impl<G: Scope<Timestamp=u64>> KMeansPPInitialise<G, (f64, Point), Vec<Point>> fo
 }
 
 pub trait SumDistances<G: Scope, D1: Data, D2: Data> {
-    fn sum_square_distances(&self) -> (Stream<G, D2>, Stream<G, D1>);
+    fn sum_square_distances(&self) -> Stream<G, D2>;
 }
 
 trait SumLocalDistances<G: Scope, D1: Data, D2: Data> {
-    fn sum_local_squared_distances(&self) -> (Stream<G, D2>, Stream<G, D1>);
+    fn sum_local_squared_distances(&self) -> Stream<G, D2>;
 }
 
 trait SumStream<G: Scope, D1: Data> {
@@ -377,9 +378,8 @@ for Stream<G, (f64, Point)> {
     fn update_categories(&self, cats: &Stream<G, Vec<Point>>)
                                -> (Stream<G, (f64, Point)>, Stream<G, Vec<(bool, Point)>>)
     {
-        let (cat_compare, cat_update) = cats.duplicate();
         let (data, new_cats) =
-            self.update_categories_local(&cat_update);
+            self.update_categories_local(cats);
         let glob_new_cats = new_cats
             .exchange(|_| 0)
             .accumulate(
@@ -398,7 +398,7 @@ for Stream<G, (f64, Point)> {
             .broadcast();
 
         let result = glob_new_cats.binary_frontier(
-            &cat_compare,
+            cats,
             Pipeline,
             Pipeline,
             "Compare new categories with old",
@@ -450,52 +450,33 @@ for Stream<G, (f64, Point)> {
     fn update_categories_local(&self, cats: &Stream<G, Vec<Point>>)
         -> (Stream<G, (f64, Point)>, Stream<G, Vec<(Point, usize)>>)
     {
-        let mut builder = OperatorBuilder::new("Select samples".to_owned(), self.scope());
-        builder.set_notify(true);
-
-        // set up the input and output points for this stream
-        let mut data_input = builder.new_input(self, Pipeline);
-        let mut cats_input = builder.new_input(cats, Pipeline);
-        let (mut cats_output, cats_stream) = builder.new_output();
-        let (mut data_output, data_stream) = builder.new_output();
-
-        // builds the operator
-        builder.build(move |mut caps| {
-            let mut old_cats = HashMap::new();
-            let mut new_cats = HashMap::new();
-            let mut to_sample = HashMap::new();
-            let mut data_cap = caps.pop();
-            let mut cats_cap = caps.pop();
-
-            move |frontiers| {
-                if data_cap.is_none() {
-                    return;
-                }
-                while let Some((cap, weight)) = cats_input.next() {
-                    let time = cap.time().clone();
-                    let cats = old_cats.entry(cap.retain())
-                        .or_insert_with(Vec::new);
-                    *cats = weight.get(0).unwrap().clone();
-                    new_cats.insert(time, vec!((Point::origin(), 0); cats.len()));
-                }
-                while let Some((cap, data)) = data_input.next() {
-                    let incoming_data = to_sample
-                        .entry(cap.time().clone())
-                        .or_insert_with(Vec::new);
-                    incoming_data.append(&mut data.replace(Vec::new()));
-                }
-                // TODO: Make sure both frontiers are taken into account
-                let data_frontier = &frontiers[0].frontier();
-                let cat_frontier = &frontiers[1].frontier();
-                if !old_cats.is_empty() {
+        let stream_splitter = self.binary_frontier(
+            cats,
+            Pipeline,
+            Pipeline,
+            "Update categories",
+            |_, _| {
+                let mut old_cats = HashMap::new();
+                let mut new_cats = HashMap::new();
+                let mut to_sample = HashMap::new();
+                move |data_input, cats_input, output| {
+                    while let Some((cap, weight)) = cats_input.next() {
+                        let time = cap.time().clone();
+                        let cats = old_cats.entry(cap.retain())
+                            .or_insert_with(Vec::new);
+                        *cats = weight.get(0).unwrap().clone();
+                        new_cats.insert(time, vec!((Point::origin(), 0); cats.len()));
+                    }
+                    while let Some((cap, data)) = data_input.next() {
+                        let incoming_data = to_sample
+                            .entry(cap.time().clone())
+                            .or_insert_with(Vec::new);
+                        incoming_data.append(&mut data.replace(Vec::new()));
+                    }
                     for (time, cats) in old_cats.iter_mut() {
-                        if !data_frontier.less_equal(time.time())
-                        && !cat_frontier.less_equal(time.time()) {
-
-                            let mut cats_handle = cats_output.activate();
-                            let mut cats_sesh = cats_handle.session(cats_cap.as_ref().unwrap());
-                            let mut data_handle = data_output.activate();
-                            let mut data_sesh = data_handle.session(data_cap.as_ref().unwrap());
+                        if !data_input.frontier().less_equal(time.time())
+                            && !cats_input.frontier().less_equal(time.time()) {
+                            let mut sesh = output.session(time);
                             let mut new_cat_list = new_cats.remove(time.time()).unwrap_or_else(Vec::new);
                             if let Some(mut data) = to_sample.remove(time.time()) {
                                 while let Some(mut datum) = data.pop() {
@@ -510,47 +491,22 @@ for Stream<G, (f64, Point)> {
                                     }
                                     new_cat_list[cat_i].0 = new_cat_list[cat_i].0.add(&datum.1);
                                     new_cat_list[cat_i].1 += 1;
-                                    data_sesh.give(datum);
+                                    sesh.give(LeftStream(datum));
                                 }
                             }
                             let mut cats_new = vec!();
-                            for (point, sum) in new_cat_list {
-                                cats_new.push((point, sum));
-                            }
-                            cats_sesh.give(cats_new);
+                            std::mem::swap(&mut cats_new, &mut new_cat_list);
+                            sesh.give(RightStream(cats_new));
                             *cats = Vec::new();
-
-                            // downgrade the capabilities
-                            let new_time = smallest_time(&data_frontier, time.time());
-                            match new_time {
-
-                                Some(t) => {
-                                    cats_cap.as_mut().unwrap().downgrade(t);
-                                    data_cap.as_mut().unwrap().downgrade(t);
-                                }
-                                None => {
-                                    cats_cap = None;
-                                    data_cap = None;
-                                }
-                            }
                         }
                     }
                     old_cats.retain(|_, prob| !prob.is_empty());
-                } else {
-                    if let (Some(t0), Some(t1))
-                    = (data_cap.as_ref(), cats_cap.as_ref()) {
-                        if !data_frontier.less_equal(t0)
-                        && !cat_frontier.less_equal(t0)
-                        && !data_frontier.less_equal(t1)
-                        && !cat_frontier.less_equal(t1) {
-                            cats_cap = None;
-                            data_cap = None;
-                        }
-                    }
                 }
             }
-        });
-        (data_stream, cats_stream)
+        );
+        let (data, cats) = stream_splitter
+            .branch(|_, d| d.path());
+        (data.map(|v| v.left()), cats.map(|v| v.right()))
     }
 }
 
@@ -560,12 +516,12 @@ impl<G: Scope> SelectWeightedInitial<G, (f64, Point), f64> for Stream<G, (f64, P
     {
         let (sampled, data) = self
             .select_weighted_initial_local(sums);
-        let (sub_sums, sampled) = sampled
+        let sub_sums = sampled
             .exchange(|_| 0)
             .sum_local_squared_distances();
-        let (mut glob_sampled, rejected) = sampled
+        let (glob_sampled, rejected) = sampled
             .select_weighted_initial_local(&sub_sums);
-        glob_sampled = glob_sampled.broadcast();
+        let glob_sampled = glob_sampled.broadcast();
         (glob_sampled, data.concat(&rejected))
     }
 }
@@ -576,93 +532,56 @@ impl<G: Scope> SelectWeightedInitialLocal<G, (f64, Point), f64> for Stream<G, (f
     fn select_weighted_initial_local(&self, sums: &Stream<G, f64>)
         -> (Stream<G, (f64, Point)>, Stream<G, (f64, Point)>)
     {
-        let mut builder = OperatorBuilder::new("Select samples".to_owned(), self.scope());
-        builder.set_notify(true);
-
-        // set up the input and output points for this stream
-        let mut data_input = builder.new_input(self, Pipeline);
-        let mut ratio_input = builder.new_input(sums, Pipeline);
-        let (mut sampled_output, sampled_stream) = builder.new_output();
-        let (mut data_output, data_stream) = builder.new_output();
-        let mut generator = rand::thread_rng();
-
-        // builds the operator
-        builder.build(move |mut caps| {
-            let mut probs = HashMap::new();
-            let mut to_sample = HashMap::new();
-            let mut data_cap = caps.pop();
-            let mut sampled_cap = caps.pop();
-
-            move |frontiers| {
-                while let Some((cap, weight)) = ratio_input.next() {
-                    let rate = probs.entry(cap.time().clone()).or_insert(0f64);
-                    *rate = generator.gen_range(0.0, weight[0]);
-                }
-                while let Some((cap, data)) = data_input.next() {
-                    let incoming_data = to_sample
-                        .entry(cap.time().clone())
-                        .or_insert_with(Vec::new);
-                    incoming_data.append(&mut data.replace(Vec::new()));
-                }
-                let ratio_frontier = &frontiers[1].frontier();
-                let data_frontier = &frontiers[0].frontier();
-                if !probs.is_empty() {
+        let stream_splitter = self.binary_frontier(
+            sums,
+            Pipeline,
+            Pipeline,
+            "Select weighted initial",
+            |_, _| {
+                let mut probs = HashMap::new();
+                let mut to_sample = HashMap::new();
+                let mut generator = rand::thread_rng();
+                move |data_input, ratio_input, output| {
+                    while let Some((cap, weight)) = ratio_input.next() {
+                        let rate = probs.entry(cap.retain()).or_insert(0f64);
+                        *rate = generator.gen_range(0.0, weight[0]);
+                    }
+                    while let Some((cap, data)) = data_input.next() {
+                        let incoming_data = to_sample
+                            .entry(cap.time().clone())
+                            .or_insert_with(Vec::new);
+                        incoming_data.append(&mut data.replace(Vec::new()));
+                    }
                     for (time, prob) in probs.iter_mut() {
-                        if !data_frontier.less_equal(time)
-                        && !ratio_frontier.less_equal(time) {
-
-                            let mut sample_handle = sampled_output.activate();
-                            let mut sample_sesh = sample_handle.session(sampled_cap.as_ref().unwrap());
-                            let mut data_handle = data_output.activate();
-                            let mut data_sesh = data_handle.session(data_cap.as_ref().unwrap());
-                            if let Some(mut data) = to_sample.remove(time) {
+                        if !data_input.frontier().less_equal(time)
+                            && !ratio_input.frontier().less_equal(time) {
+                            let mut sesh = output.session(time);
+                            if let Some(mut data) = to_sample.remove(time.time()) {
                                 if *prob > 0.0 {
                                     while let Some(datum) = data.pop() {
                                         *prob -= datum.0.powi(2);
                                         if *prob <= 0.0 {
-                                            sample_sesh.give(datum);
+                                            sesh.give(LeftStream(datum));
                                             break;
                                         } else {
-                                            data_sesh.give(datum);
+                                            sesh.give(RightStream(datum));
                                         }
                                     }
                                 }
                                 while let Some(datum) = data.pop() {
-                                    data_sesh.give(datum);
+                                    sesh.give(RightStream(datum));
                                 }
                             }
                             *prob = f64::NAN;
-
-                            // downgrade the capabilities
-                            let new_time =
-                                smallest_time(&data_frontier, sampled_cap.as_ref().unwrap().time());
-                            match new_time {
-
-                                Some(t) => {
-                                    sampled_cap.as_mut().unwrap().downgrade(t);
-                                    data_cap.as_mut().unwrap().downgrade(t);
-                                }
-                                None => {
-                                    sampled_cap = None;
-                                    data_cap = None;
-                                }
-                            }
                         }
                     }
                     probs.retain(|_, prob| !prob.is_nan());
-                } else if let (Some(t0), Some(t1)) =
-                            (sampled_cap.as_ref(), data_cap.as_ref()) {
-                    if !data_frontier.less_equal(t0)
-                    && !data_frontier.less_equal(t1)
-                    && !ratio_frontier.less_equal(t0)
-                    && !ratio_frontier.less_equal(t1) {
-                        sampled_cap = None;
-                        data_cap = None;
-                    }
                 }
             }
-        });
-        (sampled_stream, data_stream)
+        );
+        let (samples, remaining) = stream_splitter
+            .branch(|_, v| v.path());
+        (samples.map(|v| v.left()), remaining.map(|v| v.right()))
     }
 }
 
@@ -746,9 +665,7 @@ impl<G: Scope> SumStream<G, f64> for Stream<G, f64> {
                     while let Some((cap, data)) = input.next() {
                         let sum = sums.entry(cap.retain()).or_insert(Some(0f64))
                             .as_mut().unwrap();
-                        for datum in data.iter() {
-                            *sum += *datum;
-                        }
+                        *sum += data.iter().sum::<f64>();
                     }
                     for (time, sum_opt) in sums.iter_mut() {
                         if !input.frontier().less_equal(time.time()) {
@@ -766,85 +683,44 @@ impl<G: Scope> SumStream<G, f64> for Stream<G, f64> {
 }
 
 impl<G: Scope> SumDistances<G, (f64, Point), f64> for Stream<G, (f64, Point)> {
-    fn sum_square_distances(&self) -> (Stream<G, f64>, Stream<G, (f64, Point)>) {
-        let (sum, piped) = self.sum_local_squared_distances();
+    fn sum_square_distances(&self) -> Stream<G, f64> {
+        let sum = self.sum_local_squared_distances();
         let glob_sum = sum.exchange(|_| 0).sum().broadcast();
-        (glob_sum, piped)
+        glob_sum
     }
 }
 
 impl<G: Scope> SumLocalDistances<G, (f64, Point), f64> for Stream<G, (f64, Point)> {
-    fn sum_local_squared_distances(&self) -> (Stream<G, f64>, Stream<G, (f64, Point)>) {
-        let mut builder = OperatorBuilder::new("Select local random".to_owned(), self.scope());
-        builder.set_notify(true);
+    fn sum_local_squared_distances(&self) -> Stream<G, f64> {
+        self.unary_frontier(
+            Pipeline,
+            "Local sum",
+            |_, _| {
+                let mut sums = HashMap::new();
+                move |input, output| {
+                    while let Some((cap, data)) = input.next() {
 
-        // set up the input and output points for this stream
-        let mut input = builder.new_input(self, Pipeline);
-        let (mut sum_output, sum_stream) = builder.new_output();
-        let (mut pipe_output, pipe_stream) = builder.new_output();
-
-        // builds the operator
-        builder.build(move |mut caps| {
-            let mut sums = HashMap::new();
-            let mut pipe_cap = caps.pop();
-            let mut sum_cap = caps.pop();
-
-            move |frontiers| {
-                if sum_cap.is_none() {
-                    return;
-                }
-                while let Some((cap, data)) = input.next() {
-                    let sum = sums.entry(cap.time().clone()).or_insert(
-                        0f64
-                    );
-                    let mut pipe_handle = pipe_output.activate();
-                    let mut pipe_sesh = pipe_handle.session(pipe_cap.as_ref().unwrap());
-                    for val in data.iter() {
-                        *sum += val.0.powi(2);
-                        pipe_sesh.give(*val);
+                        // sum the weights found with the values, then pipe them
+                        let sum = sums.entry(cap.retain()).or_insert(
+                            0f64
+                        );
+                        data.iter().for_each(|v| {
+                            *sum += v.0.powi(2);
+                        });
                     }
-                }
-                let frontier = &frontiers[0].frontier();
-                if !sums.is_empty() {
                     for (time, sum) in sums.iter_mut() {
-                        if !frontier.less_equal(time) {
+                        if !input.frontier().less_equal(time.time()) {
 
                             // send the sum along its way
-                            let mut sum_handle = sum_output.activate();
-                            let mut sum_sesh = sum_handle.session(sum_cap.as_ref().unwrap());
-                            sum_sesh.give(*sum);
+                            let mut sesh = output.session(time);
+                            sesh.give(*sum);
                             *sum = f64::NAN;
-
-                            // downgrade the capabilities
-                            let new_time = smallest_time(&frontier, time);
-                            match new_time {
-                                Some(t) => {
-                                    sum_cap.as_mut().unwrap().downgrade(t);
-                                    pipe_cap.as_mut().unwrap().downgrade(t);
-                                }
-                                None => {
-                                    sum_cap = None;
-                                    pipe_cap = None;
-                                }
-                            }
                         }
                     }
                     sums.retain(|_, sum| !sum.is_nan());
-                } else {
-                    if let Some(t) = pipe_cap.as_ref() {
-                        if !frontier.less_equal(t) {
-                            pipe_cap = None;
-                        }
-                    }
-                    if let Some(t) = sum_cap.as_ref() {
-                        if !frontier.less_equal(t) {
-                            sum_cap = None;
-                        }
-                    }
                 }
             }
-        });
-        (sum_stream, pipe_stream)
+        )
     }
 }
 
@@ -865,7 +741,7 @@ impl<G: Scope> ClosestNeighbour<G, Point, (f64, Point)> for Stream<G, (f64, Poin
                 move |data, samples,  output| {
                     // insert the sampled data for this iteration
                     while let Some((time, data)) = samples.next() {
-                        let (sampled, _) = sample_stash.entry(time.time().clone()).or_insert((Vec::new(), time.retain()));
+                        let sampled = sample_stash.entry(time.retain()).or_insert_with(Vec::new);
                         for datum in data.iter() {
                             sampled.push(*datum);
                         }
@@ -878,14 +754,14 @@ impl<G: Scope> ClosestNeighbour<G, Point, (f64, Point)> for Stream<G, (f64, Poin
                             points.push(*datum);
                         }
                     }
-                    for (time, (stashed, cap)) in sample_stash.iter_mut() {
+                    for (cap, stashed) in sample_stash.iter_mut() {
 
                         // ensure we have all samples before proceeding
-                        if !samples.frontier().less_equal(&time)
-                        && !data.frontier().less_equal(&time) {
+                        if !samples.frontier().less_equal(cap.time())
+                        && !data.frontier().less_equal(cap.time()) {
                             let mut session = output.session(cap);
                             let mut sampled = Vec::new();
-                            let to_update = data_stash.remove(time).unwrap_or_else(|| Vec::new());
+                            let to_update = data_stash.remove(cap.time()).unwrap_or_else(Vec::new);
                             std::mem::swap(&mut sampled, stashed);
                             for (old_dist, point) in to_update {
                                 for sampled in sampled.iter() {
@@ -899,127 +775,70 @@ impl<G: Scope> ClosestNeighbour<G, Point, (f64, Point)> for Stream<G, (f64, Poin
                             }
                         }
                     }
-                    sample_stash.retain(|_, (x, _)| !x.is_empty());
-                    data_stash.retain(|_, x| !x.is_empty());
+                    sample_stash.retain(|_, x| !x.is_empty());
                 }
             }
         )
     }
 }
 
-// selects the smallest time from chain larger than larger_than
-fn smallest_time<'r, 'a, T: 'a + Ord + PartialOrder + Clone>(
-    chain: &'r AntichainRef<'a, T>,
-    larger_than: &T
-) -> Option<&'r T> {
-    let mut smallest = None;
-    chain.iter().for_each(|v| {
-        if !v.less_equal(larger_than) && smallest.is_none() {
-            smallest = Some(v);
-        } else if !smallest.is_none() && v.less_than(smallest.as_ref().unwrap()) {
-            smallest = Some(v);
-        }
-    });
-    smallest
-}
-
 // selects a single value from the stream randomly and evenly among all values
 impl<G: Scope, D: Data> SelectLocalRandom<G, D, D> for Stream<G, D> {
     fn select_local_random(&self) -> (Stream<G, D>, Stream<G, D>) {
-        let mut builder = OperatorBuilder::new("Selected local random".to_owned(), self.scope());
-        builder.set_notify(true);
-        let mut gen = thread_rng();
+        let stream_splitter = self.unary_frontier(
+            Pipeline,
+            "Select local random",
+            |_, _| {
+                let mut firsts = HashMap::new();
+                let mut gen = thread_rng();
+                move |input, output| {
+                    while let Some((time, data)) = input.next() {
+                        let mut vector = Vec::new();
 
-        // set up the input and output points for this stream
-        let mut input = builder.new_input(self, Pipeline);
-        let (mut data_output, data_stream) = builder.new_output();
-        let (mut selected_output, selected_stream) = builder.new_output();
+                        // create a "copy" time so we can retain this one and use the session
+                        // at the same time as having the first available
+                        let time_other = time.delayed(time.time());
+                        data.swap(&mut vector);
+                        let first = firsts.entry(time.retain()).or_insert(
+                            (1f64, None)
+                        );
 
-        // builds the operator
-        builder.build(move |mut caps| {
-
-            let mut vector = Vec::new();
-            let mut firsts = HashMap::new();
-            let mut selected_cap = caps.pop();
-            let mut data_cap = caps.pop();
-
-            move |frontiers| {
-                if selected_cap.is_none() { // is this even possible?
-                    return;
-                }
-                let mut data_handle = data_output.activate();
-                let mut selected_handle = selected_output.activate();
-                input.for_each(|time, data| {
-                    let mut data_session = data_handle.session(data_cap.as_ref().unwrap());
-                    data.swap(&mut vector);
-                    let mut first = firsts.entry(time.time().clone()).or_insert(
-                        (1f64, None)
-                    );
-
-                    // loop through all data individually, maintain a single value
-                    // to be selected once all data has passed
-                    for datum in vector.drain(..) {
-                        let select = gen.gen_range(0f64, f64::MAX);
-                        let prob = f64::MAX / first.0;
-                        if prob >= select {
-                            let mut to_send = None;
-                            std::mem::swap(&mut to_send, &mut first.1);
-                            if let Some(p) = to_send {
-                                data_session.give(p);
+                        // loop through all data individually, maintain a single value
+                        // to be selected once all data has passed
+                        let mut sesh = output.session(&time_other);
+                        for datum in vector.drain(..) {
+                            let select = gen.gen_range(0f64, f64::MAX);
+                            let prob = f64::MAX / first.0;
+                            if prob >= select {
+                                let mut to_send = None;
+                                std::mem::swap(&mut to_send, &mut first.1);
+                                if let Some(p) = to_send {
+                                    sesh.give(RightStream(p));
+                                }
+                                first.1 = Some(datum);
+                            } else {
+                                sesh.give(RightStream(datum));
                             }
-                            first.1 = Some(datum);
-                        } else {
-                            data_session.give(datum);
+                            first.0 += 1f64;
                         }
-                        first.0 += 1f64;
                     }
-                });
-
-                // now send the randomly selected value
-                let frontier = frontiers[0].frontier(); // should only be one to match the input
-                if !firsts.is_empty() {
                     for (time, first) in firsts.iter_mut() {
-                        if !frontier.less_equal(time) {
+                        if !input.frontier().less_equal(time) {
                             let mut to_send = None;
                             std::mem::swap(&mut to_send, &mut first.1);
                             if let Some(s) = to_send {
-                                let mut selected_session = selected_handle.session(selected_cap.as_ref().unwrap());
-                                selected_session.give(s);
-                            }
-
-                            // attempt to either downgrade or drop the capabilities of outputs
-                            let new_time = smallest_time(&frontier, time);
-                            match new_time {
-                                Some(t) => {
-                                    data_cap.as_mut().unwrap().downgrade(t);
-                                    selected_cap.as_mut().unwrap().downgrade(t);
-                                },
-                                None => {
-                                    data_cap = None;
-                                    selected_cap = None;
-                                }
+                                let mut sesh = output.session(time);
+                                sesh.give(LeftStream(s));
                             }
                         }
                     }
-                } else {
-
-                    // if firsts is empty and the timestamp has been surpassed, then
-                    // this must be the last of the data
-                    if let Some(t) = data_cap.as_ref() {
-                        if !frontier.less_equal(t.time()) {
-                            data_cap = None;
-                        }
-                    }
-                    if let Some(t) = selected_cap.as_ref() {
-                        if !frontier.less_equal(t.time()) {
-                            selected_cap = None;
-                        }
-                    }
+                    firsts.retain(|_, first| first.1.is_some());
                 }
-                firsts.retain(|_, first| first.1.is_some());
             }
-        });
-        (selected_stream, data_stream)
+        );
+        let (selected, remaining) = stream_splitter
+            .branch(|_, v| v.path());
+        (selected.map(|v| v.left()), remaining.map(|v| v.right()))
     }
 }
 

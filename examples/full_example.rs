@@ -1,28 +1,19 @@
-#[macro_use]
-extern crate abomonation_derive;
+extern crate timely_kmeans;
 
-mod point;
-mod random;
-mod euclidean_distance;
-#[allow(dead_code)]
-mod common;
-mod traditional;
-mod sampler;
-
-use point::Point;
+use timely_kmeans::point::Point;
 // use traditional::{SelectRandom, ClosestNeighbour, SumDistances, UpdateCategories};
 // use sampler::SampleData;
 use timely::dataflow::operators::{Input, Inspect};
 // use timely::dataflow::operators::capture::replay::Replay;
 use timely::dataflow::{InputHandle, ProbeHandle};
 use std::f64;
-use crate::traditional::{KMeansPPInitialise, LloydsIteration, ScalableInitialise};
+use timely_kmeans::traditional::{KMeansPPInitialise, LloydsIteration, ScalableInitialise};
 // use crate::euclidean_distance::EuclideanDistance;
 use std::io::{BufReader, BufRead, LineWriter, Write};
 use std::fs::File;
 use std::sync::mpsc::channel;
-use crate::euclidean_distance::EuclideanDistance;
-use crate::common::Attributable;
+use timely_kmeans::euclidean_distance::EuclideanDistance;
+use timely_kmeans::common::Attributable;
 
 fn gen_file_names(prefix: &String, size: usize) -> Vec<String> {
     let mut paths = vec!();
@@ -242,8 +233,8 @@ fn main() {
     // run kmeans
     let data = "../rust_classifiers/data/mpi/1procs/easy_clusters".to_string();
     // let data = "../rust_classifiers/data/mpi/2procs/easy_clusters".to_string();
-    // let cats = match kmeans_pp(data, 15) {
-    let cats = match kmeans_scalable(data, 15) {
+    let cats = match kmeans_pp(data, 15) {
+    // let cats = match kmeans_scalable(data, 15) {
         Some(v) => v,
         None => {
             println!("Kmeans failed");
