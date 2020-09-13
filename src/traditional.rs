@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::borrow::ToOwned;
 use timely::dataflow::operators::generic::builder_rc::OperatorBuilder;
 use rand::{Rng, thread_rng};
-use timely::dataflow::operators::{Operator, Exchange, Broadcast, Map, Concat, Accumulate, Feedback, Enter, ConnectLoop, BranchWhen, Leave, Branch};
+use timely::dataflow::operators::{Operator, Exchange, Broadcast, Map, Concat, Accumulate, Feedback, Enter, ConnectLoop, BranchWhen, Leave, Branch, Inspect};
 use timely::dataflow::{
     Stream,
     Scope
@@ -176,13 +176,14 @@ impl<G: Scope<Timestamp=u64>> KMeansPPInitialise<G, Vec<Point>> for Stream<G, Po
                 let (new_cat, passed) = raw_data
                     .select_weighted_initial(&sums);
                 let new_cat = new_cat
-                    .map(|v| v.1);
-                let new_cat = new_cat
+                    .map(|v| v.1)
                     .branch_when(move |time|
                         k > 1 && time.inner >= (k - 2) as u64
                     );
                 new_cat.0.connect_loop(cat_iter_handle);
-                passed.connect_loop(data_iter_handle);
+                passed.branch_when(move |time|
+                    k > 1 && time.inner >= (k - 2) as u64
+                ).0.connect_loop(data_iter_handle);
 
                 // return the chosen categories
                 cats.concat(&new_cat.1).leave()
@@ -191,7 +192,8 @@ impl<G: Scope<Timestamp=u64>> KMeansPPInitialise<G, Vec<Point>> for Stream<G, Po
     }
 }
 
-pub trait SumDistances<G: Scope, D: Data> {
+// traits for internal use only
+trait SumDistances<G: Scope, D: Data> {
     fn sum_square_distances(&self) -> Stream<G, D>;
 }
 
@@ -208,11 +210,11 @@ trait BranchAfter<G: Scope, D1: Data, D2: Data> {
     where L: Fn(&G::Timestamp, &D2) -> bool + 'static;
 }
 
-pub trait ClosestNeighbour<G: Scope, D1: Data, D2: Data> {
+trait ClosestNeighbour<G: Scope, D1: Data, D2: Data> {
     fn closest_neighbour(&self, sampled: &Stream<G, D1>) -> Stream<G, D2>;
 }
 
-pub trait SelectSamples<G: Scope, D1: Data, D2: Data> {
+trait SelectSamples<G: Scope, D1: Data, D2: Data> {
     fn sample_data(&self, selection_ratios: &Stream<G, D2>) -> (Stream<G, D1>, Stream<G, D1>);
 }
 
@@ -220,7 +222,7 @@ trait SelectSamplesLocal<G: Scope, D1: Data, D2: Data> {
     fn sample_data_local(&self, selection_ratios: &Stream<G, D2>) -> (Stream<G, D1>, Stream<G, D1>);
 }
 
-pub trait SelectWeightedInitial<G: Scope, D1: Data, D2: Data> {
+trait SelectWeightedInitial<G: Scope, D1: Data, D2: Data> {
     fn select_weighted_initial(&self, sums: &Stream<G, D2>) -> (Stream<G, D1>, Stream<G, D1>);
 }
 
@@ -228,14 +230,14 @@ trait SelectWeightedInitialLocal<G: Scope, D1: Data, D2: Data> {
     fn select_weighted_initial_local(&self, sums: &Stream<G, D2>) -> (Stream<G, D1>, Stream<G, D1>);
 }
 
-pub trait SelectRandom<G: Scope, D1: Data, D2: Data> {
+trait SelectRandom<G: Scope, D1: Data, D2: Data> {
     fn select_random(&self, id: usize) -> (Stream<G, D1>, Stream<G, D2>);
 }
 trait SelectLocalRandom<G: Scope, D1: Data, D2: Data> {
     fn select_local_random(&self) -> (Stream<G, D1>, Stream<G, D2>);
 }
 
-pub trait UpdateCategories<G: Scope, D1: Data, D2: Data, D3: Data> {
+trait UpdateCategories<G: Scope, D1: Data, D2: Data, D3: Data> {
     fn update_categories(&self, cats: &Stream<G, D2>) -> (Stream<G, D1>, Stream<G, D3>);
 }
 
@@ -243,11 +245,11 @@ trait UpdateCategoriesLocal<G: Scope, D1: Data, D2: Data, D3: Data> {
     fn update_categories_local(&self, cats: &Stream<G, D2>) -> (Stream<G, D1>, Stream<G, D3>);
 }
 
-pub trait CreateCategories<G: Scope, D1: Data> {
+trait CreateCategories<G: Scope, D1: Data> {
     fn create_categories(&self) -> Stream<G, Vec<D1>>;
 }
 
-pub trait DuplicateStream<G: Scope, D1: Data> {
+trait DuplicateStream<G: Scope, D1: Data> {
     fn duplicate(&self) -> (Stream<G, D1>, Stream<G, D1>);
 }
 
@@ -266,28 +268,33 @@ for Stream<G, D1> {
                 let mut to_send = HashMap::new();
                 move |data_input, cond_input, output| {
                     while let Some((cap, v)) = cond_input.next() {
-                        let cond = stash.entry(cap.retain()).or_insert(Some(0u64));
-                        *cond.as_mut().unwrap() += v.iter().sum::<u64>();
+                        let cond = stash.entry(cap.time().clone()).or_insert(0u64);
+                        *cond += v.iter().sum::<u64>();
                     }
                     while let Some((cap, v)) = data_input.next() {
-                        let data = to_send.entry(cap.time().clone()).or_insert_with(Vec::new);
+                        let data = to_send
+                            .entry(cap.retain())
+                            .or_insert_with(|| Some(Vec::new()))
+                            .as_mut()
+                            .unwrap();
                         data.append(&mut v.replace(Vec::new()));
                     }
-                    for (time, val) in stash.iter_mut() {
+                    for (time, data) in to_send.iter_mut() {
                         if !data_input.frontier().less_equal(time.time())
                             && !cond_input.frontier().less_equal(time.time()) {
                             let mut sesh = output.session(time);
-                            for datum in to_send.remove(time.time()).unwrap_or_else(Vec::new) {
-                                if logic(time.time(), &val.unwrap_or(0u64)) {
+                            let val = stash.remove(time.time()).unwrap_or(0u64);
+                            while let Some(datum) = data.as_mut().unwrap().pop() {
+                                if logic(time.time(), &val) {
                                     sesh.give(RightStream(datum));
                                 } else {
                                     sesh.give(LeftStream(datum));
                                 }
                             }
-                            *val = None;
+                            *data = None;
                         }
                     }
-                    stash.retain(|_, v| v.is_some());
+                    to_send.retain(|_, v| v.is_some());
                 }
             }
         );
@@ -389,15 +396,15 @@ for Stream<G, (f64, Point)> {
                 let mut new_cats = HashMap::new();
                 move |in_new, in_old, out| {
                     while let Some((cap, dat)) = in_new.next() {
-                        new_cats.insert(cap.retain(), dat[0].clone());
+                        new_cats.insert(cap.time().clone(), dat[0].clone());
                     }
                     while let Some((cap, dat)) = in_old.next() {
                         old_cats.insert(cap.retain(), Some(dat[0].clone()));
                     }
                     for (time, old_cats_opt) in old_cats.iter_mut() {
-                        let old_cats = old_cats_opt.as_ref().unwrap();
                         if !in_new.frontier().less_equal(time.time())
                         && !in_old.frontier().less_equal(time.time()) {
+                            let old_cats = old_cats_opt.as_ref().unwrap();
                             let mut sesh = out.session(time);
                             let mut results = vec!();
                             if let Some(new_cats) = new_cats.remove(time) {
@@ -439,28 +446,30 @@ for Stream<G, (f64, Point)> {
             "Update categories",
             |_, _| {
                 let mut old_cats = HashMap::new();
-                let mut new_cats = HashMap::new();
                 let mut to_sample = HashMap::new();
                 move |data_input, cats_input, output| {
                     while let Some((cap, weight)) = cats_input.next() {
-                        let time = cap.time().clone();
-                        let cats = old_cats.entry(cap.retain())
+                        let cats = old_cats.entry(cap.time().clone())
                             .or_insert_with(Vec::new);
-                        *cats = weight.get(0).unwrap().clone();
-                        new_cats.insert(time, vec!((Point::origin(), 0); cats.len()));
+                        *cats = weight.get(0).unwrap_or_else(|| cats).clone();
+                        // *cats = weight.get(0).unwrap().clone();
                     }
                     while let Some((cap, data)) = data_input.next() {
                         let incoming_data = to_sample
-                            .entry(cap.time().clone())
-                            .or_insert_with(Vec::new);
+                            .entry(cap.retain())
+                            .or_insert_with(|| Some(Vec::new()))
+                            .as_mut()
+                            .unwrap();
                         incoming_data.append(&mut data.replace(Vec::new()));
                     }
-                    for (time, cats) in old_cats.iter_mut() {
+                    for (time, sending) in to_sample.iter_mut() {
                         if !data_input.frontier().less_equal(time.time())
                             && !cats_input.frontier().less_equal(time.time()) {
+                            let data = sending.as_mut().unwrap();
                             let mut sesh = output.session(time);
-                            let mut new_cat_list = new_cats.remove(time.time()).unwrap_or_else(Vec::new);
-                            if let Some(mut data) = to_sample.remove(time.time()) {
+                            let cats = old_cats.remove(time.time()).unwrap_or_else(Vec::new);
+                            if cats.len() > 0 {
+                                let mut new_cat_list = vec!((Point::origin(), 0); cats.len());
                                 while let Some(mut datum) = data.pop() {
                                     datum.0 = f64::MAX;
                                     let mut cat_i = 0;
@@ -475,14 +484,15 @@ for Stream<G, (f64, Point)> {
                                     new_cat_list[cat_i].1 += 1;
                                     sesh.give(LeftStream(datum));
                                 }
+                                let mut cats_new = vec!();
+                                std::mem::swap(&mut cats_new, &mut new_cat_list);
+                                sesh.give(RightStream(cats_new));
+                            } else {
+                                *sending = None;
                             }
-                            let mut cats_new = vec!();
-                            std::mem::swap(&mut cats_new, &mut new_cat_list);
-                            sesh.give(RightStream(cats_new));
-                            *cats = Vec::new();
                         }
                     }
-                    old_cats.retain(|_, prob| !prob.is_empty());
+                    to_sample.retain(|_, prob| prob.is_some());
                 }
             }
         );
@@ -502,9 +512,9 @@ impl<G: Scope> SelectWeightedInitial<G, (f64, Point), f64> for Stream<G, (f64, P
             .exchange(|_| 0)
             .sum_local_squared_distances();
         let (glob_sampled, rejected) = sampled
+            .exchange(|_| 0)
             .select_weighted_initial_local(&sub_sums);
-        let glob_sampled = glob_sampled.broadcast();
-        (glob_sampled, data.concat(&rejected))
+        (glob_sampled.broadcast(), data.concat(&rejected))
     }
 }
 
@@ -525,24 +535,28 @@ impl<G: Scope> SelectWeightedInitialLocal<G, (f64, Point), f64> for Stream<G, (f
                 let mut generator = rand::thread_rng();
                 move |data_input, ratio_input, output| {
                     while let Some((cap, weight)) = ratio_input.next() {
-                        let rate = probs.entry(cap.retain()).or_insert(0f64);
+                        let rate = probs.entry(cap.time().clone()).or_insert(0f64);
                         *rate = generator.gen_range(0.0, weight[0]);
                     }
                     while let Some((cap, data)) = data_input.next() {
                         let incoming_data = to_sample
-                            .entry(cap.time().clone())
-                            .or_insert_with(Vec::new);
+                            .entry(cap.retain())
+                            .or_insert_with(|| Some(Vec::new()))
+                            .as_mut().unwrap();
                         incoming_data.append(&mut data.replace(Vec::new()));
                     }
-                    for (time, prob) in probs.iter_mut() {
+                    for (time, data_opt) in to_sample.iter_mut() {
                         if !data_input.frontier().less_equal(time)
                             && !ratio_input.frontier().less_equal(time) {
+                            let mut rep_opt = None;
+                            std::mem::swap(&mut rep_opt, data_opt);
                             let mut sesh = output.session(time);
-                            if let Some(mut data) = to_sample.remove(time.time()) {
-                                if *prob > 0.0 {
+                            let mut data = rep_opt.unwrap_or_else(Vec::new);
+                            if let Some(mut prob) = probs.remove(time.time()) {
+                                if prob > 0.0 {
                                     while let Some(datum) = data.pop() {
-                                        *prob -= datum.0.powi(2);
-                                        if *prob <= 0.0 {
+                                        prob -= datum.0.powi(2);
+                                        if prob <= 0.0 {
                                             sesh.give(LeftStream(datum));
                                             break;
                                         } else {
@@ -550,14 +564,14 @@ impl<G: Scope> SelectWeightedInitialLocal<G, (f64, Point), f64> for Stream<G, (f
                                         }
                                     }
                                 }
-                                while let Some(datum) = data.pop() {
-                                    sesh.give(RightStream(datum));
-                                }
                             }
-                            *prob = f64::NAN;
+                            while let Some(datum) = data.pop() {
+                                sesh.give(RightStream(datum));
+                            }
+                            *data_opt = None;
                         }
                     }
-                    probs.retain(|_, prob| !prob.is_nan());
+                    to_sample.retain(|_, v| v.is_some());
                 }
             }
         );
@@ -595,20 +609,24 @@ impl<G: Scope> SelectSamplesLocal<G, (f64, Point), (f64, usize)> for Stream<G, (
                 let mut generator = rand::thread_rng();
                 move |data_input, rates_input, output| {
                     while let Some((cap, weight)) = rates_input.next() {
-                        let rate = rates.entry(cap.retain()).or_insert((1f64, 0));
+                        let rate = rates.entry(cap.time().clone()).or_insert((1f64, 0));
                         *rate = weight[0];
                     }
                     while let Some((cap, data)) = data_input.next() {
                         let incoming_data = to_sample
-                            .entry(cap.time().clone())
-                            .or_insert_with(Vec::new);
+                            .entry(cap.retain())
+                            .or_insert_with(|| Some(Vec::new()))
+                            .as_mut().unwrap();
                         incoming_data.append(&mut data.replace(Vec::new()));
                     }
-                    for (time, weight) in rates.iter_mut() {
+                    for (time, data_opt) in to_sample.iter_mut() {
                         if !data_input.frontier().less_equal(time.time())
                             && !rates_input.frontier().less_equal(time.time()) {
+                            let mut rep_opt = None;
+                            std::mem::swap(&mut rep_opt, data_opt);
                             let mut sesh = output.session(time);
-                            if let Some(mut data) = to_sample.remove(time.time()) {
+                            let mut data = rep_opt.unwrap_or_else(Vec::new);
+                            if let Some(weight) = rates.remove(time.time()) {
                                 while let Some(datum) = data.pop() {
                                     let prob = generator.gen_range(0.0, 1.0);
                                     let select = (datum.0.powi(2) * weight.1 as f64) / weight.0;
@@ -619,10 +637,10 @@ impl<G: Scope> SelectSamplesLocal<G, (f64, Point), (f64, usize)> for Stream<G, (
                                     }
                                 }
                             }
-                            weight.0 = f64::NAN;
+                            *data_opt = None;
                         }
                     }
-                    rates.retain(|_, v| !v.0.is_nan());
+                    to_sample.retain(|_, v| v.is_some());
                 }
             }
         );
@@ -663,7 +681,7 @@ impl<G: Scope> SumStream<G, f64> for Stream<G, f64> {
 impl<G: Scope> SumDistances<G, f64> for Stream<G, (f64, Point)> {
     fn sum_square_distances(&self) -> Stream<G, f64> {
         let sum = self.sum_local_squared_distances();
-        let glob_sum = sum.exchange(|_| 0).sum().broadcast();
+        let glob_sum = sum.broadcast().sum();
         glob_sum
     }
 }
@@ -719,7 +737,9 @@ impl<G: Scope> ClosestNeighbour<G, Point, (f64, Point)> for Stream<G, (f64, Poin
                 move |data, samples,  output| {
                     // insert the sampled data for this iteration
                     while let Some((time, data)) = samples.next() {
-                        let sampled = sample_stash.entry(time.retain()).or_insert_with(Vec::new);
+                        let sampled = sample_stash
+                            .entry(time.time().clone())
+                            .or_insert_with(Vec::new);
                         for datum in data.iter() {
                             sampled.push(*datum);
                         }
@@ -727,32 +747,37 @@ impl<G: Scope> ClosestNeighbour<G, Point, (f64, Point)> for Stream<G, (f64, Poin
 
                     // compare all the other data with the sampled to re-calcaulte their nearest neighbour
                     while let Some((time, data)) = data.next() {
-                        let points = data_stash.entry(time.time().clone()).or_insert_with(Vec::new);
+                        let points = data_stash
+                            .entry(time.retain())
+                            .or_insert_with(|| Some(Vec::new()))
+                            .as_mut()
+                            .unwrap();
                         for datum in data.iter() {
                             points.push(*datum);
                         }
                     }
-                    for (cap, stashed) in sample_stash.iter_mut() {
-
+                    for (cap, to_update) in data_stash.iter_mut() {
                         // ensure we have all samples before proceeding
                         if !samples.frontier().less_equal(cap.time())
-                        && !data.frontier().less_equal(cap.time()) {
+                            && !data.frontier().less_equal(cap.time()) {
                             let mut session = output.session(cap);
-                            let to_update = data_stash.remove(cap.time()).unwrap_or_else(Vec::new);
-                            for (old_dist, point) in to_update {
-                                let mut best_dist = old_dist;
-                                for sampled in stashed.iter() {
+                            let to_update_vec = to_update.as_mut().unwrap();
+                            let stashed_vec = sample_stash
+                                .remove(cap).unwrap_or_else(Vec::new);
+                            for (old_dist, point) in to_update_vec {
+                                let mut best_dist = *old_dist;
+                                for sampled in stashed_vec.iter() {
                                     let new_dist = point.distance(sampled);
                                     if new_dist < best_dist {
                                         best_dist = new_dist;
                                     }
                                 }
-                                session.give((best_dist, point));
+                                session.give((best_dist, *point));
                             }
-                            *stashed = Vec::new();
+                            *to_update = None;
                         }
                     }
-                    sample_stash.retain(|_, x| !x.is_empty());
+                    data_stash.retain(|_, x| x.is_some());
                 }
             }
         )

@@ -3,7 +3,7 @@ extern crate timely_kmeans;
 use timely_kmeans::point::Point;
 // use traditional::{SelectRandom, ClosestNeighbour, SumDistances, UpdateCategories};
 // use sampler::SampleData;
-use timely::dataflow::operators::{Input, Inspect};
+use timely::dataflow::operators::{Input, Inspect, Probe};
 // use timely::dataflow::operators::capture::replay::Replay;
 use timely::dataflow::{InputHandle, ProbeHandle};
 use std::f64;
@@ -27,10 +27,20 @@ fn gen_file_names(prefix: &String, size: usize) -> Vec<String> {
     paths
 }
 
+fn get_my_file(size: usize, index: usize) -> String {
+    format!(
+        "{}{}{}{}",
+        "../rust_classifiers/data/mpi/",
+        size,
+        "procs/easy_clusters",
+        index
+    )
+}
+
 // takes a file of data to build the classifier and returns
 // the generated categories or None if training failed
 #[allow(dead_code)]
-fn kmeans_scalable(data_path: String, cats: usize) -> Option<Vec<Point>> {
+fn kmeans_scalable(_data_path: String, cats: usize) -> Option<Vec<Point>> {
     let cat_receivers =
         timely::execute_from_args(std::env::args(), move |worker| {
             let mut input = InputHandle::new();
@@ -40,7 +50,7 @@ fn kmeans_scalable(data_path: String, cats: usize) -> Option<Vec<Point>> {
             let (sender, receiver) = channel();
 
             // only for use with local testing
-            let mut paths = gen_file_names(&data_path, worker.peers());
+            // let mut paths = gen_file_names(&data_path, worker.peers());
 
 
             // select the initial random point
@@ -52,7 +62,6 @@ fn kmeans_scalable(data_path: String, cats: usize) -> Option<Vec<Point>> {
                 data.lloyds_iteration(&cats, 100)
                     .inspect_batch(move |_t, data| {
                         for v in data {
-                            // println!("time {:?} final cats: {:?}", t, v);
                             for item in v {
                                 match sender.send(*item) {
                                     // get the compiler off my back
@@ -64,7 +73,8 @@ fn kmeans_scalable(data_path: String, cats: usize) -> Option<Vec<Point>> {
             });
 
             // send the point data from the file
-            let data = File::open(paths.remove(index)).unwrap();
+            // let data = File::open(paths.remove(index)).unwrap();
+            let data = File::open(get_my_file(worker.peers(), index)).unwrap();
             let reader = BufReader::new(data);
             // let reader = BufReader::new(data);
             let mut lines = reader.lines();
@@ -95,24 +105,26 @@ fn kmeans_scalable(data_path: String, cats: usize) -> Option<Vec<Point>> {
 // takes a file of data to build the classifier and returns
 // the generated categories or None if training failed
 #[allow(dead_code)]
-fn kmeans_pp(data_path: String, cats: usize) -> Option<Vec<Point>> {
+fn kmeans_pp(_data_path: String, cats: usize) -> Option<Vec<Point>> {
     let cat_receivers =
     timely::execute_from_args(std::env::args(), move |worker| {
         let mut input = InputHandle::new();
-        let sum_probe = ProbeHandle::new();
+        let mut lloyd_probe = ProbeHandle::new();
+        let mut init_probe = ProbeHandle::new();
         let index = worker.index();
         // let data = File::open(data_path.clone()).unwrap();
         let (sender, receiver) = channel();
 
         // only for use with local testing
-        let mut paths = gen_file_names(&data_path, worker.peers());
+        // let mut paths = gen_file_names(&data_path, worker.peers());
 
 
         // select the initial random point
         worker.dataflow(|scope| {
             let data = scope.input_from(&mut input);
             let cats = data
-                .kmeans_pp_initialise(cats, index);
+                .kmeans_pp_initialise(cats, index)
+                .probe_with(&mut init_probe);
             data.lloyds_iteration(&cats, 100)
                 .inspect_batch(move |_t, data| {
                     for v in data {
@@ -123,11 +135,13 @@ fn kmeans_pp(data_path: String, cats: usize) -> Option<Vec<Point>> {
                             }
                         }
                     }
-                });
+                })
+                .probe_with(&mut lloyd_probe);
         });
 
         // send the point data from the file
-        let data = File::open(paths.remove(index)).unwrap();
+        // let data = File::open(paths.remove(index)).unwrap();
+        let data = File::open(get_my_file(worker.peers(), index)).unwrap();
         let reader = BufReader::new(data);
         // let reader = BufReader::new(data);
         let mut lines = reader.lines();
@@ -137,10 +151,13 @@ fn kmeans_pp(data_path: String, cats: usize) -> Option<Vec<Point>> {
                 Err(_) => continue
             }
         }
+        input.close();
 
         // advance the dataflow
-        input.advance_to(input.epoch() + 1);
-        while sum_probe.less_than(input.time()) {
+        while !init_probe.done() {
+            worker.step();
+        }
+        while !lloyd_probe.done() {
             worker.step();
         }
         return receiver;
@@ -226,8 +243,8 @@ fn main() {
     let output_file = "../rust_classifiers/data/timely_output.csv".to_string();
 
     // run kmeans
-    let data = "../rust_classifiers/data/mpi/1procs/easy_clusters".to_string();
-    // let data = "../rust_classifiers/data/mpi/2procs/easy_clusters".to_string();
+    // let data = "../rust_classifiers/data/mpi/1procs/easy_clusters".to_string();
+    let data = "../rust_classifiers/data/mpi/2procs/easy_clusters".to_string();
     // let cats = match kmeans_pp(data, 15) {
     let cats = match kmeans_scalable(data, 15) {
         Some(v) => v,
