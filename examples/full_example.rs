@@ -44,7 +44,8 @@ fn kmeans_scalable(_data_path: String, cats: usize) -> Option<Vec<Point>> {
     let cat_receivers =
         timely::execute_from_args(std::env::args(), move |worker| {
             let mut input = InputHandle::new();
-            let sum_probe = ProbeHandle::new();
+            let mut initialise_probe = ProbeHandle::new();
+            let mut lloyd_probe = ProbeHandle::new();
             let index = worker.index();
             // let data = File::open(data_path.clone()).unwrap();
             let (sender, receiver) = channel();
@@ -58,7 +59,8 @@ fn kmeans_scalable(_data_path: String, cats: usize) -> Option<Vec<Point>> {
             worker.dataflow(|scope| {
                 let data = scope.input_from(&mut input);
                 let cats = data
-                    .scalable_initialise(cats, index);
+                    .scalable_initialise(cats, index)
+                    .probe_with(&mut initialise_probe);
                 data.lloyds_iteration(&cats, 100)
                     .inspect_batch(move |_t, data| {
                         for v in data {
@@ -69,7 +71,8 @@ fn kmeans_scalable(_data_path: String, cats: usize) -> Option<Vec<Point>> {
                                 }
                             }
                         }
-                    });
+                    })
+                    .probe_with(&mut lloyd_probe);
             });
 
             // send the point data from the file
@@ -87,7 +90,10 @@ fn kmeans_scalable(_data_path: String, cats: usize) -> Option<Vec<Point>> {
 
             // advance the dataflow
             input.advance_to(input.epoch() + 1);
-            while sum_probe.less_than(input.time()) {
+            while initialise_probe.less_than(input.time()) {
+                worker.step();
+            }
+            while lloyd_probe.less_than(input.time()) {
                 worker.step();
             }
             return receiver;
