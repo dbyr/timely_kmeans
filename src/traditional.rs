@@ -114,13 +114,14 @@ for Stream<G, Point> {
                     .map(|v| (f64::MAX, v))
                     .enter(iter_scope).concat(&data_iter_stream);
                 let cats = cats
-                    .enter(iter_scope).concat(&cat_iter_stream);
+                    .enter(iter_scope).concat(&cat_iter_stream)
+                    .inspect_batch(
+                        |t, v| println!("cats at {:?}: {:?}", t.inner, v)
+                    );
 
                 // iterate until either 100 iterations or convergence
                 let (data, new_cats) =
                     data.update_categories(&cats);
-                // new_cats.inspect_batch(|t, v|
-                // println!("cats at {:?}: {:?}", t.inner, v));
                 let data = data
                     .branch(move |t, d| d.0.is_nan() || t.inner >= limit);
                 let new_cats = new_cats
@@ -129,12 +130,20 @@ for Stream<G, Point> {
                     );
                 new_cats.0
                     .map(|v| v.into_iter().map(|v| v.1).collect())
+                    .inspect_batch(
+                        |t, v|
+                            println!("looping cats at {:?}: {:?}", t.inner, v)
+                    )
                     .connect_loop(cat_iter_handle);
                 data.0
                     .connect_loop(data_iter_handle);
 
                 // return the final categories
                 new_cats.1
+                    .inspect_batch(
+                        |t, v|
+                            println!("returning cats at {:?}: {:?}", t.inner, v)
+                    )
                     .map(|v|
                         v.into_iter().map(|v| v.1).collect()
                     )
@@ -429,7 +438,11 @@ for Stream<G, (f64, Point)> {
                             let mut results = vec!();
                             if let Some(new_cats) = new_cats.remove(time) {
                                 for (old, new) in old_cats.iter().zip(new_cats.iter()) {
-                                    let new_cat = new.0.scalar_div(new.1 as f64);
+                                    let new_cat = if new.1 != 0 {
+                                        new.0.scalar_div(new.1 as f64)
+                                    } else {
+                                        new.0
+                                    };
                                     if new_cat == *old {
                                         results.push((false, new_cat));
                                     } else {
@@ -441,7 +454,7 @@ for Stream<G, (f64, Point)> {
                             *old_cats_opt = None;
                         }
                     }
-                    old_cats.retain(|_, h| !h.is_none());
+                    old_cats.retain(|_, h| h.is_some());
                 }
             }
         );
@@ -457,7 +470,7 @@ for Stream<G, (f64, Point)> {
 impl<G: Scope> UpdateCategoriesLocal<G, (f64, Point), Vec<Point>, Vec<(Point, usize)>>
 for Stream<G, (f64, Point)> {
     fn update_categories_local(&self, cats: &Stream<G, Vec<Point>>)
-                               -> (Stream<G, (f64, Point)>, Stream<G, Vec<(Point, usize)>>)
+        -> (Stream<G, (f64, Point)>, Stream<G, Vec<(Point, usize)>>)
     {
         let stream_splitter = self.binary_frontier(
             cats,
@@ -466,53 +479,82 @@ for Stream<G, (f64, Point)> {
             "Update categories",
             |_, _| {
                 let mut old_cats = HashMap::new();
-                let mut to_sample = HashMap::new();
+                let mut new_cats = HashMap::new();
+                let mut to_sample: HashMap<_, Vec<(f64, Point)>> = HashMap::new();
                 move |data_input, cats_input, output| {
                     while let Some((cap, weight)) = cats_input.next() {
-                        let cats = old_cats.entry(cap.time().clone())
-                            .or_insert_with(Vec::new);
-                        *cats = weight.get(0).unwrap_or_else(|| cats).clone();
-                        // *cats = weight.get(0).unwrap().clone();
-                    }
-                    while let Some((cap, data)) = data_input.next() {
-                        let incoming_data = to_sample
-                            .entry(cap.retain())
+                        let cats = old_cats.entry(cap.retain())
                             .or_insert_with(|| Some(Vec::new()))
-                            .as_mut()
-                            .unwrap();
-                        incoming_data.append(&mut data.replace(Vec::new()));
+                            .as_mut().unwrap();
+                        *cats = weight.get(0).unwrap_or_else(|| cats).clone();
                     }
-                    for (time, sending) in to_sample.iter_mut() {
-                        if !data_input.frontier().less_equal(time.time())
-                            && !cats_input.frontier().less_equal(time.time()) {
-                            let data = sending.as_mut().unwrap();
+                    for (time, cat_opts) in old_cats.iter_mut() {
+                        if !cats_input.frontier().less_equal(time.time()) {
+                            let cats = cat_opts.as_mut().unwrap();
+                            let mut new_cat_list = new_cats.entry(time.time().clone())
+                                .or_insert_with(|| vec!((Point::origin(), 0); cats.len()));
                             let mut sesh = output.session(time);
-                            let cats = old_cats.remove(time.time()).unwrap_or_else(Vec::new);
+
                             if cats.len() > 0 {
-                                let mut new_cat_list = vec!((Point::origin(), 0); cats.len());
-                                while let Some(mut datum) = data.pop() {
-                                    datum.0 = f64::MAX;
-                                    let mut cat_i = 0;
-                                    for (i, cat) in cats.iter().enumerate() {
-                                        let new_dist = datum.1.distance(cat);
-                                        if new_dist < datum.0 {
-                                            datum.0 = new_dist;
-                                            cat_i = i;
+
+                                // drain stashed data first
+                                // let mut new_cat_list = vec!((Point::origin(), 0); cats.len());
+                                // let data = to_sample.remove(time.time()).unwrap_or_else(Vec::new);
+                                // for mut datum in data {
+                                //     datum.0 = f64::MAX;
+                                //     let mut cat_i = 0;
+                                //     for (i, cat) in cats.iter().enumerate() {
+                                //         let new_dist = datum.1.distance(cat);
+                                //         if new_dist < datum.0 {
+                                //             datum.0 = new_dist;
+                                //             cat_i = i;
+                                //         }
+                                //     }
+                                //     new_cat_list[cat_i].0 = new_cat_list[cat_i].0.add(&datum.1);
+                                //     new_cat_list[cat_i].1 += 1;
+                                //     sesh.give(LeftStream(datum));
+                                // }
+
+                                // then get to current data
+                                while let Some((cap, data)) = data_input.next() {
+                                    if cap.time() != time.time() {
+                                        let incoming_data = to_sample
+                                            .entry(cap.time().clone())
+                                            .or_insert_with(Vec::new);
+                                        incoming_data.append(&mut data.replace(Vec::new()));
+                                    } else {
+                                        let mut to_send = to_sample.remove(cap.time()).unwrap_or_else(Vec::new);
+                                        to_send.append(&mut data.replace(Vec::new()));
+                                        for mut datum in to_send {
+                                            datum.0 = f64::MAX;
+                                            let mut cat_i = 0;
+                                            for (i, cat) in cats.iter().enumerate() {
+                                                let new_dist = datum.1.distance(cat);
+                                                if new_dist < datum.0 {
+                                                    datum.0 = new_dist;
+                                                    cat_i = i;
+                                                }
+                                            }
+                                            new_cat_list[cat_i].0 = new_cat_list[cat_i].0.add(&datum.1);
+                                            new_cat_list[cat_i].1 += 1;
+                                            sesh.give(LeftStream(datum));
                                         }
                                     }
-                                    new_cat_list[cat_i].0 = new_cat_list[cat_i].0.add(&datum.1);
-                                    new_cat_list[cat_i].1 += 1;
-                                    sesh.give(LeftStream(datum));
                                 }
-                                let mut cats_new = vec!();
-                                std::mem::swap(&mut cats_new, &mut new_cat_list);
-                                sesh.give(RightStream(cats_new));
-                            } else {
-                                *sending = None;
                             }
                         }
+                        if !data_input.frontier().less_equal(time.time()) {
+                            let mut sesh = output.session(time);
+                            if let Some(send) = new_cats.remove(time.time()) {
+                                sesh.give(RightStream(send));
+                            }
+                            let to_send = to_sample.remove(time.time()).unwrap_or_else(Vec::new);
+                            println!("missing {:?}", to_send.len());
+                            sesh.give_vec(&mut to_send.into_iter().map(|v| LeftStream(v)).collect());
+                            *cat_opts = None;
+                        }
                     }
-                    to_sample.retain(|_, prob| prob.is_some());
+                    old_cats.retain(|_, cats| cats.is_some());
                 }
             }
         );
@@ -521,98 +563,6 @@ for Stream<G, (f64, Point)> {
         (data.map(|v| v.left()), cats.map(|v| v.right()))
     }
 }
-
-// impl<G: Scope> UpdateCategoriesLocal<G, (f64, Point), Vec<Point>, Vec<(Point, usize)>>
-// for Stream<G, (f64, Point)> {
-//     fn update_categories_local(&self, cats: &Stream<G, Vec<Point>>)
-//         -> (Stream<G, (f64, Point)>, Stream<G, Vec<(Point, usize)>>)
-//     {
-//         let stream_splitter = self.binary_frontier(
-//             cats,
-//             Pipeline,
-//             Pipeline,
-//             "Update categories",
-//             |_, _| {
-//                 let mut old_cats = HashMap::new();
-//                 let mut new_cats = HashMap::new();
-//                 let mut to_sample: HashMap<_, Vec<(f64, Point)>> = HashMap::new();
-//                 move |data_input, cats_input, output| {
-//                     while let Some((cap, weight)) = cats_input.next() {
-//                         let cats = old_cats.entry(cap.retain())
-//                             .or_insert_with(|| Some(Vec::new()))
-//                             .as_mut().unwrap();
-//                         *cats = weight.get(0).unwrap_or_else(|| cats).clone();
-//                     }
-//                     for (time, cat_opts) in old_cats.iter_mut() {
-//                         if !cats_input.frontier().less_equal(time.time()) {
-//                             let cats = cat_opts.as_mut().unwrap();
-//                             let mut new_cat_list = new_cats.entry(time.time().clone())
-//                                 .or_insert_with(|| vec!((Point::origin(), 0); cats.len()));
-//                             let mut sesh = output.session(time);
-//
-//                             if cats.len() > 0 {
-//
-//                                 // drain stashed data first
-//                                 // let mut new_cat_list = vec!((Point::origin(), 0); cats.len());
-//                                 let data = to_sample.remove(time.time()).unwrap_or_else(Vec::new);
-//                                 for mut datum in data {
-//                                     datum.0 = f64::MAX;
-//                                     let mut cat_i = 0;
-//                                     for (i, cat) in cats.iter().enumerate() {
-//                                         let new_dist = datum.1.distance(cat);
-//                                         if new_dist < datum.0 {
-//                                             datum.0 = new_dist;
-//                                             cat_i = i;
-//                                         }
-//                                     }
-//                                     new_cat_list[cat_i].0 = new_cat_list[cat_i].0.add(&datum.1);
-//                                     new_cat_list[cat_i].1 += 1;
-//                                     sesh.give(LeftStream(datum));
-//                                 }
-//
-//                                 // then get to current data
-//                                 while let Some((cap, data)) = data_input.next() {
-//                                     if cap.time() != time.time() {
-//                                         let incoming_data = to_sample
-//                                             .entry(cap.time().clone())
-//                                             .or_insert_with(Vec::new);
-//                                         incoming_data.append(&mut data.replace(Vec::new()));
-//                                     } else {
-//                                         for mut datum in data.replace(Vec::new()) {
-//                                             datum.0 = f64::MAX;
-//                                             let mut cat_i = 0;
-//                                             for (i, cat) in cats.iter().enumerate() {
-//                                                 let new_dist = datum.1.distance(cat);
-//                                                 if new_dist < datum.0 {
-//                                                     datum.0 = new_dist;
-//                                                     cat_i = i;
-//                                                 }
-//                                             }
-//                                             new_cat_list[cat_i].0 = new_cat_list[cat_i].0.add(&datum.1);
-//                                             new_cat_list[cat_i].1 += 1;
-//                                             sesh.give(LeftStream(datum));
-//                                         }
-//                                     }
-//                                 }
-//                             }
-//                         }
-//                         if !data_input.frontier().less_equal(time.time()) {
-//                             let mut sesh = output.session(time);
-//                             if let Some(send) = new_cats.remove(time.time()) {
-//                                 sesh.give(RightStream(send));
-//                             }
-//                             *cat_opts = None;
-//                         }
-//                     }
-//                     old_cats.retain(|_, cats| cats.is_some());
-//                 }
-//             }
-//         );
-//         let (data, cats) = stream_splitter
-//             .branch(|_, d| d.path());
-//         (data.map(|v| v.left()), cats.map(|v| v.right()))
-//     }
-// }
 
 impl<G: Scope> SelectWeightedInitial<G, (f64, Point), f64> for Stream<G, (f64, Point)> {
     fn select_weighted_initial(&self, sums: &Stream<G, f64>)

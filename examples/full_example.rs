@@ -33,6 +33,7 @@ fn get_my_file(size: usize, index: usize) -> String {
         "../rust_classifiers/data/mpi/",
         size,
         "procs/easy_clusters",
+        // "procs/big_data",
         index
     )
 }
@@ -245,8 +246,8 @@ fn main() {
     // run kmeans
     // let data = "../rust_classifiers/data/mpi/1procs/easy_clusters".to_string();
     let data = "../rust_classifiers/data/mpi/2procs/easy_clusters".to_string();
-    // let cats = match kmeans_pp(data, 15) {
-    let cats = match kmeans_scalable(data, 15) {
+    let cats = match kmeans_pp(data, 15) {
+    // let cats = match kmeans_scalable(data, 15) {
         Some(v) => v,
         None => {
             println!("Kmeans failed");
@@ -257,34 +258,34 @@ fn main() {
 
 
     // do the optional classification of the whole file
-    let f_out = match File::create(output_file) {
-        Ok(f) => f,
-        Err(_) => {
-            println!("Couldn't create clustered data file");
-            return;
-        },
-    };
+    // let f_out = match File::create(output_file) {
+    //     Ok(f) => f,
+    //     Err(_) => {
+    //         println!("Couldn't create clustered data file");
+    //         return;
+    //     },
+    // };
 
-    let f = match File::open(input_file) {
-        Ok(f) => f,
-        Err(_) => {
-            println!("Couldn't open file containing data");
-            return;
-        },
-    };
-    let data = match point_vec_from_file(&f) {
-        Ok(v) => v,
-        Err(_) => {
-            println!("Couldn't read data from file");
-            return;
-        }
-    };
-    match classify_csv(&cats, &f_out, &data) {
-        Ok(_) => return,
-        Err(_) => {
-            println!("Could not write csv file");
-            return;
-        },
-    }
+    // let f = match File::open(input_file) {
+    //     Ok(f) => f,
+    //     Err(_) => {
+    //         println!("Couldn't open file containing data");
+    //         return;
+    //     },
+    // };
+    // let data = match point_vec_from_file(&f) {
+    //     Ok(v) => v,
+    //     Err(_) => {
+    //         println!("Couldn't read data from file");
+    //         return;
+    //     }
+    // };
+    // match classify_csv(&cats, &f_out, &data) {
+    //     Ok(_) => return,
+    //     Err(_) => {
+    //         println!("Could not write csv file");
+    //         return;
+    //     },
+    // }
 }
 
