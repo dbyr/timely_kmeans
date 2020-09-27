@@ -16,7 +16,7 @@ use std::fmt::{
 };
 
 // abomonation required to use datatype with timely
-#[derive(PartialEq, Default, Copy, Clone, Abomonation)]
+#[derive(Default, Copy, Clone, Abomonation)]
 pub struct Point {
     x: f64,
     y: f64
@@ -64,6 +64,17 @@ impl Point{
             }
         };
         return Ok(Point::new(x, y));
+    }
+}
+
+fn reasonably_equal(a: &f64, b: &f64) -> bool {
+    (a - b).abs() <= 0.0000001
+}
+
+impl PartialEq for Point {
+    fn eq(&self, other: &Point) -> bool {
+        reasonably_equal(&self.x, &other.x) 
+            && reasonably_equal(&self.y, &other.y)
     }
 }
 
